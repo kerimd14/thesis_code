@@ -1,0 +1,15 @@
+# 1) Never track any experiments folder
+experiments/
+
+# 2) Ignore everything else…
+*
+
+# 3) …but still recurse into subdirectories
+!*/
+
+# 4) Only allow Python and Markdown files
+!*.py
+!*.md
+
+# 5) And of course keep this file tracked
+!/.gitignore
