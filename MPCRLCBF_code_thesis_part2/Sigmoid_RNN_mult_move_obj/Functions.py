@@ -1,10 +1,12 @@
 
 import numpy as np
-import os # to communicate with the operating system
+import os # to communicate with the operating system\
+import optuna
+import copy
 import casadi as cs
 import matplotlib.pyplot as plt
 import pandas as pd
-from Classes import MPC, ObstacleMotion
+from Classes import MPC, ObstacleMotion, RNN, env, RLclass
 from matplotlib.colors import Normalize
 import matplotlib.cm as cm
 import matplotlib.animation as animation
@@ -26,7 +28,7 @@ def flat_input_fn(mpc, X, horizon, xpred_hor, ypred_hor, m):
     return flat_in
 
 
-def stage_cost_func(action, x):
+def stage_cost_func(action, x, S, slack_penalty):
             """Computes the stage cost :math:`L(s,a)`.
             """
             # same as the MPC ones
@@ -36,7 +38,7 @@ def stage_cost_func(action, x):
             state = x
             return (
                 state.T @ Qstage @ state
-                + action.T @ Rstage @ action
+                + action.T @ Rstage @ action + np.sum(slack_penalty * S)  # slack penalty
             )
                 
 
@@ -64,8 +66,10 @@ def MPC_func(x, mpc, params, solver_inst, xpred_list, ypred_list, hidden_in, m, 
         
         print(f"cbf_const_lbg: {cbf_const_lbg.shape}, cbf_const_ubg: {cbf_const_ubg.shape}")
 
-        lbx = np.concatenate([np.array(x).flatten(), X_lower_bound, U_lower_bound])  
-        ubx = np.concatenate([np.array(x).flatten(), X_upper_bound, U_upper_bound])
+        # lbx = np.concatenate([np.array(x).flatten(), X_lower_bound, U_lower_bound])  
+        # ubx = np.concatenate([np.array(x).flatten(), X_upper_bound, U_upper_bound])
+        lbx = np.concatenate([np.array(x).flatten(), X_lower_bound, U_lower_bound, np.zeros(mpc.rnn.obst.obstacle_num *mpc.horizon)])  
+        ubx = np.concatenate([np.array(x).flatten(), X_upper_bound, U_upper_bound, np.inf*np.ones(mpc.rnn.obst.obstacle_num *mpc.horizon)])
 
         lbg = np.concatenate([state_const_lbg, cbf_const_lbg])  
         ubg = np.concatenate([state_const_ubg, cbf_const_ubg])
@@ -102,7 +106,7 @@ def MPC_func(x, mpc, params, solver_inst, xpred_list, ypred_list, hidden_in, m, 
         u_opt = solution["x"][mpc.ns * (mpc.horizon+1):mpc.ns * (mpc.horizon+1) + mpc.na]
         
         flat_input = flat_input_fn(mpc, solution["x"][:mpc.ns * (mpc.horizon+1)], mpc.horizon, xpred_list, ypred_list, m)
-        # self.horizon*
+        # mpc.horizon*
         x_t0 = flat_input[:1*mpc.ns+mpc.rnn.obst.obstacle_num]
         
         get_hidden_func = mpc.rnn.make_rnn_step()
@@ -117,8 +121,10 @@ def MPC_func(x, mpc, params, solver_inst, xpred_list, ypred_list, hidden_in, m, 
         x_prev = solution["x"]
         lam_x_prev = solution["lam_x"]
         lam_g_prev= solution["lam_g"]
+        
+        S = solution["x"][mpc.na * (mpc.horizon) + mpc.ns * (mpc.horizon+1):]
 
-        return u_opt, solution["f"], alpha, g_resid, hidden_t1, x_prev, lam_x_prev, lam_g_prev
+        return u_opt, solution["f"], alpha, g_resid, hidden_t1, x_prev, lam_x_prev, lam_g_prev, S
 
 def save_figures(figures, experiment_folder):
         save_choice = True#input("Save the figure? (y/n): ")
@@ -127,6 +133,7 @@ def save_figures(figures, experiment_folder):
             for fig, filename in figures: 
                 file_path = os.path.join(experiment_folder, filename) # add the file to directory
                 fig.savefig(file_path)
+                plt.close(fig)
                 print(f"Figure saved as: {file_path}")
         else:
             print("Figure not saved")
@@ -157,9 +164,9 @@ def make_system_obstacle_animation(
     fig, ax = plt.subplots()
     ax.set_aspect("equal", "box")
     ax.grid(True)
-    ax.set_xlabel("$x$")
-    ax.set_ylabel("$y$")
-    ax.set_title("system + Moving Obstacles")
+    ax.set_xlabel(r"$x$")
+    ax.set_ylabel(r"$y$")
+    ax.set_title(r"System + Moving Obstacles")
 
     # fixed zoom
     span = constraints_x
@@ -223,12 +230,14 @@ def calculate_trajectory_length(states):
 
 
 
-def run_simulation(params, env, experiment_folder, episode_duration, layers_list, after_updates, horizon, positions, radii, modes, mode_params):
+def run_simulation(params, env, experiment_folder, episode_duration, 
+                   layers_list, after_updates, horizon, positions,
+                   radii, modes, mode_params, slack_penalty_eval):
     """
     USE the after_updates flag to determine if the simulation is run after the updates or not!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     """
     env = env()
-    mpc = MPC(layers_list, horizon, positions, radii)
+    mpc = MPC(layers_list, horizon, positions, radii, slack_penalty_eval)
     obst_motion = ObstacleMotion(positions, modes, mode_params)
 
    
@@ -253,7 +262,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, layers_list
     hx = [ np.array([ float(hf(cs.DM(state), xpred_list[0:mpc.rnn.obst.obstacle_num], ypred_list[0:mpc.rnn.obst.obstacle_num])) for hf in h_func_list ]) ]
     # hx = []
 
-    solver_inst = mpc.MPC_solver_noslack() 
+    solver_inst = mpc.MPC_solver() 
     
     #for plotting the moving obstacle
     obs_positions = [obst_motion.current_positions()]
@@ -270,7 +279,9 @@ def run_simulation(params, env, experiment_folder, episode_duration, layers_list
     for i in range(episode_duration):
 
 
-        action, _, alpha, g_resid, hidden_in, x_prev, lam_x_prev, lam_g_prev = MPC_func(state, mpc, params, solver_inst, xpred_list, ypred_list, hidden_in, m, x_prev, lam_x_prev, lam_g_prev)
+        action, _, alpha, g_resid, hidden_in, x_prev, lam_x_prev, lam_g_prev, S = MPC_func(state, mpc, params, solver_inst, 
+                                                                                        xpred_list, ypred_list, hidden_in, 
+                                                                                        m, x_prev, lam_x_prev, lam_g_prev)
 
         alphas.append(alpha)
 
@@ -288,7 +299,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, layers_list
 
         hx.append(np.array([ float(hf(cs.DM(state), xpred_list[0:mpc.rnn.obst.obstacle_num], ypred_list[0:mpc.rnn.obst.obstacle_num])) for hf in h_func_list ]))
 
-        stage_cost.append(stage_cost_func(action, state))
+        stage_cost.append(stage_cost_func(action, state, S, slack_penalty_eval))
 
         print(i)
         
@@ -311,9 +322,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, layers_list
     g_resid_lst = np.array(g_resid_lst)
     hx = np.vstack(hx)
     alphas = np.array(alphas)
-    print(f"alphas shape: {alphas.shape}")
     alphas = np.squeeze(alphas)  # remove single-dimensional entries from the shape
-    print(f"alphas shape: {alphas.shape}")
     obs_positions = np.array(obs_positions)
     lam_g_hist = np.vstack(lam_g_hist)
 
@@ -328,52 +337,6 @@ def run_simulation(params, env, experiment_folder, episode_duration, layers_list
     CONSTRAINTS_X[0],
     out_gif,
 )
-    # T = len(states)
-    # system_xy = states[:, :2]
-
-    # fig_anim, ax = plt.subplots()
-    # ax.set_autoscale_on(False)
-    # ax.set_xlabel("$x$")
-    # ax.set_ylabel("$y$")
-    # ax.set_title("system + Moving Obstacle")
-    # ax.grid(True)
-    # ax.axis("equal")
-
-    # # system path line + current position dot
-    # line, = ax.plot([], [], "o-", lw=2, label="system path")
-    # dot,  = ax.plot([], [], "ro", ms=6,    label="system")
-
-    # # obstacle circle
-    # circle = plt.Circle((0,0), radii[0], fill=False, color="k", lw=2, label="obstacle")
-    # ax.add_patch(circle)
-    # ax.legend(loc="upper right")
-
-    # def init():
-    #     ax.set_xlim(-1.5*CONSTRAINTS_X, CONSTRAINTS_X)
-    #     ax.set_ylim(-1.5*CONSTRAINTS_X, CONSTRAINTS_X)
-    #     line.set_data([], [])
-    #     dot.set_data([], [])
-    #     circle.center = (obs_positions[0,0,0], obs_positions[0,0,1])
-    #     return line, dot, circle
-
-    # def update(k):
-    #     # system
-    #     xk, yk = system_xy[k]
-    #     line.set_data(system_xy[:k+1,0], system_xy[:k+1,1])
-    #     dot.set_data(xk, yk)
-    #     # obstacle
-    #     cx, cy = obs_positions[k,0]
-    #     circle.center = (cx, cy)
-    #     return line, dot, circle
-
-    # ani = animation.FuncAnimation(
-    #     fig_anim, update, frames=T, init_func=init,
-    #     blit=True, interval=100
-    # )
-    # # ani.save(out_path, fps=10, dpi=150)
-    # ani.save(os.path.join(experiment_folder, "system_and_obstacle.gif"), fps=10, dpi=150)
-    # plt.show()
-    # plt.close(fig_anim)
     
     suffix = 'after' if after_updates else 'before'
     cols = [f"lam_g_{i}" for i in range(lam_g_hist.shape[1])]
@@ -390,140 +353,107 @@ def run_simulation(params, env, experiment_folder, episode_duration, layers_list
         f.write(table_str)
 
 
+    # State Trajectory
     fig_states = plt.figure()
-    plt.plot(states[:, 0], states[:, 1], "o-", label="trajectory")
+    plt.plot(states[:,0], states[:,1], "o-", label=r"trajectory")
     for (cx, cy), r in zip(positions, radii):
-        circle = plt.Circle((cx, cy), r, color="k", fill=False, linewidth=2)
+        circle = plt.Circle((cx, cy), r, fill=False, linewidth=2, edgecolor="k")
         plt.gca().add_patch(circle)
-    plt.xlim([-CONSTRAINTS_X[0], 0.1*CONSTRAINTS_X[0]])
-    plt.ylim([-CONSTRAINTS_X[1], 0.1*CONSTRAINTS_X[1]])
-    plt.xlabel("$x$")
-    plt.ylabel("$y$")
-    plt.title("State Trajectory")
+    plt.xlabel(r"$x$")
+    plt.ylabel(r"$y$")
+    plt.title(r"State Trajectory")
     plt.axis("equal")
     plt.grid()
     plt.legend()
+    save_figures([(fig_states,
+                   f"states_trajectory_{'after' if after_updates else 'before'}.svg")],
+                 experiment_folder)
 
-
+    # Actions over time
     fig_actions = plt.figure()
-    plt.plot(actions[:, 0], "o-", label="Action 1")
-    plt.plot(actions[:, 1], "o-", label="Action 2")
-    plt.xlabel("Iteration $k$")
-    plt.ylabel("Action")
-    plt.title("Actions Over Time")
-    plt.legend()
+    plt.plot(actions[:,0], "o-", label=r"Action 1")
+    plt.plot(actions[:,1], "o-", label=r"Action 2")
+    plt.xlabel(r"Iteration $k$")
+    plt.ylabel(r"Action")
+    plt.title(r"Actions Over Time")
     plt.grid()
-    plt.tight_layout()
+    plt.legend()
+    save_figures([(fig_actions,
+                   f"actions_{'after' if after_updates else 'before'}.svg")],
+                 experiment_folder)
 
+    # Stage cost
     fig_stagecost = plt.figure()
     plt.plot(stage_cost, "o-")
-    plt.xlabel("Iteration $k$")
-    plt.ylabel("Stage Cost")
-    plt.title("Stage Cost Over Time")
+    plt.xlabel(r"Iteration $k$")
+    plt.ylabel(r"Stage Cost")
+    plt.title(r"Stage Cost Over Time")
     plt.grid()
-    plt.tight_layout()
+    save_figures([(fig_stagecost,
+                   f"stagecost_{'after' if after_updates else 'before'}.svg")],
+                 experiment_folder)
 
+    # Velocities
     fig_velocity = plt.figure()
-    plt.plot(states[:, 2], "o-", label="Velocity $v_x$")
-    plt.plot(states[:, 3], "o-", label="Velocity $v_y$")
-    plt.xlabel("Iteration $k$")
-    plt.ylabel("Velocity Value")
-    plt.title("Velocities Over Time")
+    plt.plot(states[:,2], "o-", label=r"$v_{x}$")
+    plt.plot(states[:,3], "o-", label=r"$v_{y}$")
+    plt.xlabel(r"Iteration $k$")
+    plt.ylabel(r"Velocity")
+    plt.title(r"Velocities Over Time")
+    plt.grid()
     plt.legend()
-    plt.grid()
-    plt.tight_layout()
-    
+    save_figures([(fig_velocity,
+                   f"velocity_{'after' if after_updates else 'before'}.svg")],
+                 experiment_folder)
 
+    # Alphas from your RNN
     fig_alpha = plt.figure()
-    if m == 1:
-        plt.plot(alphas, "o-", label="$\\alpha(x_k)$")
+    if alphas.ndim == 1:
+        plt.plot(alphas, "o-", label=r"$\alpha(x_k)$")
     else:
-        for i in range(m):
-            plt.plot(alphas[:, i], "o-", label=f"$\\alpha_{{{i+1}}}(x_k)$")
-    plt.xlabel("Iteration $k$")
-    plt.ylabel("$\\alpha_i(x_k)$")
-    plt.title("Neural‐Network Outputs $\\alpha_i$ (one per obstacle)")
-    plt.legend(loc="upper right", fontsize="small")
+        for i in range(alphas.shape[1]):
+            plt.plot(alphas[:,i], "o-", label=rf"$\alpha_{{{i+1}}}(x_k)$")
+    plt.xlabel(r"Iteration $k$")
+    plt.ylabel(r"$\alpha_i(x_k)$")
+    plt.title(r"Neural‐Network Outputs $\alpha_i(x_k)$")
     plt.grid()
-    plt.tight_layout()
+    plt.legend(loc="upper right", fontsize="small")
+    save_figures([(fig_alpha,
+                   f"alpha_{'after' if after_updates else 'before'}.svg")],
+                 experiment_folder)
 
-    
+    # h(x) plots
     hx_figs = []
-    for i in range(m):
+    for i in range(hx.shape[1]):
         fig_hi = plt.figure()
-        plt.plot(hx[:, i], "o-", label=f"$h_{i+1}(x_k)$")
-        plt.xlabel("Iteration $k$")
-        plt.ylabel(f"$h_{i+1}(x_k)$")
-        plt.title(f"Obstacle {i+1}: $h_{i+1}(x_k)$ Over Time")
+        plt.plot(hx[:,i], "o-", label=rf"$h_{{{i+1}}}(x_k)$")
+        plt.xlabel(r"Iteration $k$")
+        plt.ylabel(rf"$h_{{{i+1}}}(x_k)$")
+        plt.title(rf"Obstacle {i+1}: $h_{{{i+1}}}(x_k)$ Over Time")
         plt.grid()
-        plt.tight_layout()
-        hx_figs.append((fig_hi, f"hx_obstacle_{i+1}_{'after' if after_updates else 'before'}.png"))
+        save_figures([(fig_hi,
+                       f"hx_obstacle_{i+1}_{'after' if after_updates else 'before'}.svg")],
+                     experiment_folder)
 
-    #    margin_i[k] = h_i(x_{k+1}) − (1 − α_k)·h_i(x_k)
-
-    # Only compute if you want margins. If not, skip this block.
-    # T = hx.shape[0] - 1
-    # margin = np.zeros((T, m))
-    # for k in range(T):
-    #     for i in range(m):
-    #         margin[k, i] = hx[k+1, i] - (1 - alphas[k]) * hx[k, i]
-
-    # margin_figs = []
-    # for i in range(m):
-    #     fig_mi = plt.figure()
-    #     plt.plot(margin[:, i], "o-", label=f"Margin $i={i+1}$")
-    #     plt.axhline(0, color="r", linestyle="--", label="Safety Threshold")
-    #     plt.xlabel("Iteration $k$")
-    #     plt.ylabel(fr"$h_{i+1}(x_{{k+1}}) \;-\;(1-\alpha_k)\,h_{i+1}(x_k)$")
-    #     plt.title(f"Obstacle {i+1}: Safety Margin Over Time")
-    #     plt.legend(loc="lower left")
-    #     plt.grid()
-    #     plt.tight_layout()
-    #     margin_figs.append((fig_mi, f"margin_obstacle_{i+1}.png"))
-
+    # Colored-by-iteration h(x)
+    hx_colored = []
     N = hx.shape[0]
-    iters = np.arange(N)
     cmap = cm.get_cmap("nipy_spectral", N)
-    norm = Normalize(vmin=0, vmax=N - 1)
-
-    hx_col_figs = []
-    for i in range(m):
+    norm = Normalize(vmin=0, vmax=N-1)
+    for i in range(hx.shape[1]):
         fig_hi_col = plt.figure()
-        plt.scatter(iters, hx[:, i],
-                    c=iters, cmap=cmap, norm=norm, s=20)
-        plt.xlabel("Iteration $k$")
-        plt.ylabel(f"$h_{i+1}(x_k)$")
-        plt.title(f"Obstacle {i+1}: $h_{i+1}(x_k)$ Colored by Iteration")
-        plt.colorbar(label="Iteration $k$")
+        plt.scatter(np.arange(N), hx[:,i],
+                    c=np.arange(N), cmap=cmap, norm=norm, s=20)
+        plt.xlabel(r"Iteration $k$")
+        plt.ylabel(rf"$h_{{{i+1}}}(x_k)$")
+        plt.title(rf"Obstacle {i+1}: $h_{{{i+1}}}(x_k)$ Colored by Iteration")
+        plt.colorbar(label=r"Iteration $k$")
         plt.grid()
-        plt.tight_layout()
-        hx_col_figs.append((fig_hi_col, f"hx_colored_obstacle_{i+1}.png"))
+        save_figures([(fig_hi_col,
+                       f"hx_colored_obstacle_{i+1}.svg")],
+                     experiment_folder)
 
-
-    # Save Figures
-
-    figs_to_save = [
-        (fig_states,    f"states_trajectory_{'after' if after_updates else 'before'}.png"),
-        (fig_actions,   f"actions_{'after' if after_updates else 'before'}.png"),
-        (fig_stagecost, f"stagecost_{'after' if after_updates else 'before'}.png"),
-        (fig_alpha,     f"alpha_{'after' if after_updates else 'before'}.png"),
-        (fig_velocity,  f"velocity_{'after' if after_updates else 'before'}.png"),
-    ]
-    # add each h_i plot:
-    figs_to_save += hx_figs
-    # add each margin_i plot:
-    # figs_to_save += margin_figs
-    # add each colored‐by‐iteration h_i plot:
-    figs_to_save += hx_col_figs
-
-    save_figures(figs_to_save, experiment_folder)
-    #plt.show()
-    plt.close("all")  # Close all figures to free memory
-
-    trajectory_length = calculate_trajectory_length(states)
-    print(f"Total trajectory length: {trajectory_length:.3f} units")
-    print(f"Stage Cost: {stage_cost.sum():.3f}")
-
+    print(f"Saved all figures for {'after' if after_updates else 'before'} run.")
     return stage_cost.sum()
 
 def MPC_func_random(x, mpc, params, solver_inst, rand_noise,  xpred_list, ypred_list, hidden_in, m,  x_prev, lam_x_prev, lam_g_prev):
@@ -583,7 +513,7 @@ def MPC_func_random(x, mpc, params, solver_inst, rand_noise,  xpred_list, ypred_
         u_opt = solution["x"][mpc.ns * (mpc.horizon+1):mpc.ns * (mpc.horizon+1) + mpc.na]
         
         flat_input = flat_input_fn(mpc, solution["x"][:mpc.ns * (mpc.horizon+1)], mpc.horizon, xpred_list, ypred_list, m)
-        # self.horizon*
+        # mpc.horizon*
         x_t0 = flat_input[:1*mpc.ns+mpc.rnn.obst.obstacle_num]
         
         get_hidden_func = mpc.rnn.make_rnn_step()
@@ -594,8 +524,10 @@ def MPC_func_random(x, mpc, params, solver_inst, rand_noise,  xpred_list, ypred_
         
         alpha.append(y_out)
 
-
-        return u_opt, solution["f"], alpha, hidden_t1, x_prev, lam_x_prev, lam_g_prev
+        S = solution["x"][mpc.na * (mpc.horizon) + mpc.ns * (mpc.horizon+1):]
+        
+        
+        return u_opt, solution["f"], alpha, hidden_t1, x_prev, lam_x_prev, lam_g_prev, S
     
 def noise_scale_by_distance(x, y, max_radius=3):
         # i might remove this because it doesnt allow for exploration of the last states which is important
@@ -608,8 +540,9 @@ def noise_scale_by_distance(x, y, max_radius=3):
             return (dist / max_radius)
 
 
-def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, layers_list, noise_scalingfactor, 
-                             noise_variance, horizon, positions, radii, modes, mode_params):
+def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, 
+                             layers_list, noise_scalingfactor, noise_variance, 
+                             horizon, positions, radii, modes, mode_params, slack_penalty):
 
     env = env()
     obst_motion = ObstacleMotion(positions, modes, mode_params)
@@ -620,7 +553,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, l
     actions = []
     stage_cost = []
     alphas = []
-    mpc = MPC(layers_list, horizon, positions, radii)
+    mpc = MPC(layers_list, horizon, positions, radii, slack_penalty)
     
     xpred_list, ypred_list = obst_motion.predict_states(horizon)
 
@@ -638,7 +571,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, l
 
     for i in range(episode_duration):
         rand_noise = noise_scale_by_distance(state[0], state[1])*noise_scalingfactor*np_random.normal(loc=0, scale=noise_variance, size = (2,1))
-        action, _, alpha, hidden_in, x_prev, lam_x_prev, lam_g_prev = MPC_func_random(state, mpc, params, solver_inst, rand_noise, xpred_list, ypred_list, 
+        action, _, alpha, hidden_in, x_prev, lam_x_prev, lam_g_prev, S = MPC_func_random(state, mpc, params, solver_inst, rand_noise, xpred_list, ypred_list, 
                                                       hidden_in, m, x_prev, lam_x_prev, lam_g_prev)
 
         # if i<(0.65*2000):
@@ -652,7 +585,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, l
         actions.append(action)
         alphas.append(alpha)
 
-        stage_cost.append(stage_cost_func(action, state))
+        stage_cost.append(stage_cost_func(action, state, S, slack_penalty))
         
         #object moves
         _ = obst_motion.step()
@@ -685,86 +618,73 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, l
     out_gif,
 )
 
-    figstates=plt.figure()
-    plt.plot(
-        states[:, 0], states[:, 1],
-        "o-"
-    )
-
-    # Plot the obstacle
+    # State Trajectory with obstacles
+    fig_states = plt.figure()
+    plt.plot(states[:, 0], states[:, 1], "o-", label=r"trajectory")
     for (cx, cy), r in zip(positions, radii):
-        circle = plt.Circle((cx, cy), r, color="k", fill=False, linewidth=2)
+        circle = plt.Circle((cx, cy), r, fill=False, linewidth=2, edgecolor="k")
         plt.gca().add_patch(circle)
     plt.xlim([-CONSTRAINTS_X[0], 0])
     plt.ylim([-CONSTRAINTS_X[0], 0])
-
-    # Set labels and title
-    plt.xlabel("$x$")
-    plt.ylabel("$y$")
-    plt.title("Trajectories")
-    plt.legend()
+    plt.xlabel(r"$x$")
+    plt.ylabel(r"$y$")
+    plt.title(r"Trajectories")
     plt.axis("equal")
     plt.grid()
-
-    figactions=plt.figure()
-    plt.plot(actions[:, 0], "o-", label="Action 1")
-    plt.plot(actions[:, 1], "o-", label="Action 2")
-    plt.xlabel("Iteration $k$")
-    plt.ylabel("Action")
-    plt.title("Actions")
     plt.legend()
-    plt.grid()
-    plt.tight_layout()
-    # plt.show()
+    save_figures([(fig_states, "states_MPCnoise.svg")], experiment_folder)
 
-    figstagecost=plt.figure()
-    plt.plot(stage_cost, "o-")
-    plt.xlabel("Iteration $k$")
-    plt.ylabel("Cost")
-    plt.title("Stage Cost")
+
+    # Actions over time
+    fig_actions = plt.figure()
+    plt.plot(actions[:, 0], "o-", label=r"Action 1")
+    plt.plot(actions[:, 1], "o-", label=r"Action 2")
+    plt.xlabel(r"Iteration $k$")
+    plt.ylabel(r"Action")
+    plt.title(r"Actions")
+    plt.grid()
     plt.legend()
+    save_figures([(fig_actions, "actions_MPCnoise.svg")], experiment_folder)
+
+
+    # Stage Cost
+    fig_stagecost = plt.figure()
+    plt.plot(stage_cost, "o-", label=r"Stage Cost")
+    plt.xlabel(r"Iteration $k$")
+    plt.ylabel(r"Cost")
+    plt.title(r"Stage Cost")
     plt.grid()
-    plt.tight_layout()
+    plt.legend()
+    save_figures([(fig_stagecost, "stagecost_MPCrandom.svg")], experiment_folder)
 
 
+    # Alpha values from RNN
     m = mpc.rnn.obst.obstacle_num
-    print(f"shape of alphas: {alphas.shape}")
-    
-    figsalpha=plt.figure()
-    
+    fig_alpha = plt.figure()
     if m == 1:
-        plt.plot(alphas, "o-", label="$\\alpha(x_k)$")
+        plt.plot(alphas, "o-", label=r"$\alpha(x_k)$")
     else:
         for i in range(m):
-            plt.plot(alphas[:, i], "o-", label=f"$\\alpha_{{{i+1}}}(x_k)$")
-    plt.xlabel("Iteration $k$")
-    plt.ylabel("$alpha$ Value")
-    plt.title("$alpha$")
-    plt.legend()
+            plt.plot(alphas[:, i], "o-", label=rf"$\alpha_{{{i+1}}}(x_k)$")
+    plt.xlabel(r"Iteration $k$")
+    plt.ylabel(r"$\alpha_i(x_k)$")
+    plt.title(r"Neural‐Network Outputs $\alpha_i(x_k)$")
     plt.grid()
-    plt.tight_layout()
+    plt.legend(loc="upper right", fontsize="small")
+    save_figures([(fig_alpha, "alpha_MPCnoise.svg")], experiment_folder)
 
 
-    figsvelocity=plt.figure()
-    plt.plot(states[:, 2], "o-", label="Velocity x")
-    plt.plot(states[:, 3], "o-", label="Velocity y")    
-    plt.xlabel("Iteration $k$")
-    plt.ylabel("Velocity Value")
-    plt.title("Velocity Plot")
-    plt.legend()
+    # Velocities
+    fig_velocity = plt.figure()
+    plt.plot(states[:, 2], "o-", label=r"$v_x$")
+    plt.plot(states[:, 3], "o-", label=r"$v_y$")
+    plt.xlabel(r"Iteration $k$")
+    plt.ylabel(r"Velocity")
+    plt.title(r"Velocity Plot")
     plt.grid()
-    plt.tight_layout()
-    #plt.show()
+    plt.legend()
+    save_figures([(fig_velocity, "velocity_MPCnoise.svg")], experiment_folder)
 
-    figs = [
-                (figstates, "states_MPCnoise"),
-                (figactions, "actions_MPCnoise"),
-                (figstagecost, "stagecost_MPCrandom"),
-                (figsalpha, "alpha_MPCnoise"),
-                (figsvelocity, "velocity_MPCnoise")
-            ]
-
-    save_figures(figs,  experiment_folder)
 
     trajectory_length = calculate_trajectory_length(states)
     print(f"Total trajectory length: {trajectory_length:.3f} units")
@@ -772,7 +692,8 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, l
 
 def generate_experiment_notes(experiment_folder, params, params_innit, episode_duration, num_episodes, seed, alpha, sampling_time, gamma, decay_rate, decay_at_end, 
                               noise_scalingfactor, noise_variance, stage_cost_sum_before, stage_cost_sum_after, layers_list, replay_buffer, episode_updatefreq,
-                              patience_threshold, lr_decay_factor, horizon, modes, mode_params, positions, radii):
+                              patience_threshold, lr_decay_factor, horizon, modes, mode_params, positions, radii,
+                              slack_penalty):
     # used to save the parameters automatically
 
     notes = f"""
@@ -788,6 +709,7 @@ def generate_experiment_notes(experiment_folder, params, params_innit, episode_d
     Mode Parameters: {mode_params}
     Positions: {positions}
     Radii: {radii}
+    Slack Penalty: {slack_penalty}
 
     Learning Parameters:
     --------------------
@@ -829,30 +751,243 @@ def generate_experiment_notes(experiment_folder, params, params_innit, episode_d
     - Off-policy training with initial parameters
     - Noise scaling based on distance to target
     - Decay rate applied to noise over iterations
-    - scaling adjused
+    - Scaling adjused
 
     """
     save_notes(experiment_folder, notes)
+        
+def run_experiment(exp_config):
+    # ─── unpack everything from config ───────────────────────
+    dt                   = SAMPLING_TIME
+    seed                 = SEED
+
+    # noise schedule
+    initial_noise_scale  = exp_config["initial_noise_scale"]
+    noise_variance       = exp_config["noise_variance"]
+    decay_at_end         = exp_config["decay_at_end"]
+
+    # compute decay rate
+    num_episodes         = exp_config["num_episodes"]
+    episode_update_freq  = 10
+    decay_rate           = 1 - np.power(
+                              decay_at_end,
+                              1 / (num_episodes / episode_update_freq)
+                          )
+
+    # RL hyper-params
+    alpha                = exp_config["alpha"]
+    gamma                = 0.95
+    patience             = exp_config["patience"]
+    lr_decay             = exp_config["lr_decay"]
+    slack_penalty        = exp_config["slack_penalty"]
+    slack_penalty_eval  = 2e5
+
+    # episode/MPC specs
+    episode_duration     = exp_config["episode_duration"]
+    mpc_horizon          = 5
+    replay_buffer_size   = episode_duration * 10  # buffer holding number of episodes (e.g. hold 10 episodes)
+
+    # experiment folder
+    experiment_folder    = exp_config["experiment_folder"]
     
+    # ──Linear dynamics and MPC parameters───────────────────────────────────
+    params_init = {
+        "A": cs.DM([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ]),
+        "B": cs.DM([
+            [0.5 * dt**2, 0],
+            [0, 0.5 * dt**2],
+            [dt, 0],
+            [0, dt],
+        ]),
+        "b": cs.DM([0, 0, 0, 0]),
+        "V0": cs.DM(0.0),
+        "P": 100 * np.eye(NUM_STATES),
+        "Q": 10 * np.eye(NUM_STATES),
+        "R": np.eye(NUM_INPUTS),
+    }
     
-# def hyper_tuning_objective(trial):
-#     """
-#     Objective function for hyperparameter tuning using Optuna.
-#     This function defines the hyperparameters to be tuned and runs the simulation with those parameters.
-#     """
-    
-#     # Define hyperparameters to be tuned
-#     alpha = trial.suggest_float("alpha", 0.001, 0.1, log=True)
-#     noise_scalingfactor = trial.suggest_float("noise_scalingfactor", 0.1, 10.0, log=True)
-#     noise_variance = trial.suggest_float("noise_variance", 0.01, 1.0, log=True)
-#     episode_duration = trial.suggest_int("episode_duration", 100, 2000)
-#     horizon = trial.suggest_int("horizon", 5, 20)
-#     patience_threshold = trial.suggest_int("patience_threshold", 5, 50)
-#     lr_decay_factor = trial.suggest_float("lr_decay_factor", 0.1, 0.9, log=True)
-#     decay_rate = trial.suggest_float("decay_rate", 0.01, 0.1, log=True)
-#     decay_at_end = trial.suggest_categorical("decay_at_end", [True, False])
-#     replay_buffer = trial.suggest_categorical("replay_buffer", [True, False])
-    
+     # ─── Obstacle configuration ──────────────────────────────────────────────
+    positions = [(-2.0, -1.5), (-3.0, -3.0)]
+    radii     = [0.75, 0.75]
+    modes     = ["step_bounce", "step_bounce"]
+    mode_params = [
+        {"bounds": (-4.0,  0.0), "speed": 2.3, "dir":  1},
+        {"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
+    ]
     
 
-# def run_learning_experimemnt(config):
+    input_dim = NUM_STATES + len(positions)
+    hidden_dims = [14, 14]
+    output_dim = len(positions)
+    layers_list = [input_dim] + hidden_dims + [output_dim]
+    print("RNN layers:", layers_list)
+
+    rnn = RNN(layers_list, positions, radii, mpc_horizon)
+    params_init["rnn_params"], _, _, _ = rnn.initialize_parameters()
+    # keep a copy of the original parameters for later logging
+    params_before = params_init.copy()
+    
+
+    # ─── The Learning  ─────────────────────────────────────
+    
+    # run simulation of random MPC to see how the system behaves under initial random noise
+    run_simulation_randomMPC(
+        params_init,
+        env,
+        experiment_folder,
+        episode_duration,
+        layers_list,
+        initial_noise_scale,
+        noise_variance,
+        mpc_horizon,
+        positions,
+        radii,
+        modes,
+        copy.deepcopy(mode_params),
+        slack_penalty,
+    )
+
+    # run simulation to get the initial policy before training
+    stage_cost_before = run_simulation(
+        params_init,
+        env,
+        experiment_folder,
+        episode_duration,
+        layers_list,
+        after_updates=False,
+        horizon=mpc_horizon,
+        positions=positions,
+        radii=radii,
+        modes=modes,
+        mode_params=copy.deepcopy(mode_params),
+        slack_penalty_eval=slack_penalty_eval,
+    )
+
+    # use RL to train the RNN CBF with MPC
+    
+    rl_agent = RLclass(
+        params_init,
+        seed,
+        alpha,
+        gamma,
+        decay_rate,
+        layers_list,
+        initial_noise_scale,
+        noise_variance,
+        patience,
+        lr_decay,
+        mpc_horizon,
+        positions,
+        radii,
+        modes,
+        copy.deepcopy(mode_params),
+        slack_penalty,
+    )
+    
+    trained_params = rl_agent.rl_trainingloop(
+        episode_duration=episode_duration,
+        num_episodes=num_episodes,
+        replay_buffer=replay_buffer_size,
+        episode_updatefreq=episode_update_freq,
+        experiment_folder=experiment_folder,
+    )
+
+    # evaluate the trained policy
+    
+    stage_cost_after = run_simulation(
+        trained_params,
+        env,
+        experiment_folder,
+        episode_duration,
+        layers_list,
+        after_updates=True,
+        horizon=mpc_horizon,
+        positions=positions,
+        radii=radii,
+        modes=modes,
+        mode_params=copy.deepcopy(mode_params),
+        slack_penalty_eval=slack_penalty_eval,
+    )
+    
+    #save experiment configuration and results
+    generate_experiment_notes(
+        experiment_folder,
+        trained_params,
+        params_before,
+        episode_duration,
+        num_episodes,
+        seed,
+        alpha,
+        dt,
+        gamma,
+        decay_rate,
+        decay_at_end,
+        initial_noise_scale,
+        noise_variance,
+        stage_cost_before,
+        stage_cost_after,
+        layers_list,
+        replay_buffer_size,
+        episode_update_freq,
+        patience,
+        lr_decay,
+        mpc_horizon,
+        modes,
+        copy.deepcopy(mode_params),
+        positions,
+        radii,
+        slack_penalty,
+    )
+
+
+    return stage_cost_after
+BASE_DIR = "optuna_runs_1"
+def objective(trial):
+    #trial is an instance of optuna.Trial
+    os.makedirs(BASE_DIR, exist_ok=True)
+    
+    
+    exp_config = {
+        "initial_noise_scale": trial.suggest_int("init_noise", 5, 20),
+        "noise_variance":      trial.suggest_int("noise_var", 3, 15),
+        "decay_at_end":        trial.suggest_float("decay_end", 0.01, 0.1),
+        "alpha":               trial.suggest_loguniform("alpha", 1e-4, 5e-1),
+        "patience":            trial.suggest_int("patience", 100, 1_000),
+        "lr_decay":            trial.suggest_float("lr_decay", 0.1, 0.9),
+        "num_episodes":        trial.suggest_int("num_episodes", 1_000, 3_000),
+        "episode_duration":    trial.suggest_int("ep_duration",  150, 300),
+        "slack_penalty":       trial.suggest_int("slack_penalty",  5e2, 1e6),
+    }
+    
+    
+    folder = os.path.join(BASE_DIR, f"trial_{trial.number}")
+    os.makedirs(folder, exist_ok=True)
+    exp_config["experiment_folder"] = folder
+    
+    
+    return run_experiment(exp_config)
+
+def save_best_results(study: optuna.Study,
+                      base_dir: str = BASE_DIR,
+                      filename: str = "best_results.txt"):
+    """Dump the best trial’s info into a text file under BASE_DIR."""
+    best = study.best_trial
+    notes = f"""
+Best Optuna Trial
+-----------------
+Trial Number: {best.number}
+Value: {best.value}
+
+Parameters:
+{os.linesep.join(f'  • {k}: {v}' for k, v in best.params.items())}
+"""
+    os.makedirs(base_dir, exist_ok=True)
+    path = os.path.join(base_dir, filename)
+    with open(path, "w") as f:
+        f.write(notes.strip() + "\n")
+    print(f"[Info] Saved best trial to {path}")

@@ -18,9 +18,9 @@ from Functions import run_simulation, run_simulation_randomMPC, generate_experim
 
 dt = SAMPLING_TIME
 seed = SEED
-noise_scalingfactor = 20
+noise_scalingfactor = 10
 noise_variance = 5
-alpha = 5e-1
+alpha = 5e-2
 gamma = 0.95
 episode_duration= 150
 num_episodes = 3000
@@ -118,7 +118,7 @@ params_innit["nn_params"] = list
 #seems params_innit gets overwritten
 params_original = params_innit.copy() 
 
-experiment_folder_name = "NN_mult_move_obj_experiment_44"
+experiment_folder_name = "NN_mult_move_obj_experiment_53"
 
 #WATCH OUT --> since mode_params was a dict what was happening is that the values of it kept getting changed
 

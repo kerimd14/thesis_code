@@ -4,6 +4,9 @@ import os # to communicate with the operating system
 import copy
 from gymnasium.spaces import Box
 import casadi as cs
+import matplotlib
+matplotlib.use("Agg")
+matplotlib.rcParams['axes.formatter.use_mathtext'] = False
 import matplotlib.pyplot as plt
 from control import dlqr
 from collections import deque
@@ -316,7 +319,7 @@ class ObstacleMotion:
     
 class RNN:
     def __init__(self, layers_list, positions, radii, horizon):
-        
+        #TODO: Finish commenting and cleaning this funciton and onwards
         """
         Build an Elman-style RNN for CBF-based MPC.
 
@@ -642,7 +645,7 @@ class RNN:
                     
     def initialize_parameters(self):
         """
-        He‐uniform init to match exactly get_flat_parameters() ordering.
+        He-uniform init to match exactly get_flat_parameters() ordering.
         Returns
         -------
         flat_params : casadi.DM, shape=(410,1)
@@ -824,7 +827,7 @@ class MPC:
     ns = NUM_STATES # num of states
     na = NUM_INPUTS # num of inputs
 
-    def __init__(self, layers_list, horizon, positions, radii):
+    def __init__(self, layers_list, horizon, positions, radii, slack_penalty):
         """
         Initialize the MPC class with parameters.
         
@@ -886,7 +889,7 @@ class MPC:
         self.ypred_hor = cs.MX.sym("ypred_hor", self.m * (self.horizon+1))
         
         # weight on slack variables in CBF constraints
-        self.weight_cbf = cs.DM([9e3])
+        self.weight_cbf = cs.DM([slack_penalty])
 
 
         # decision variables:
@@ -1261,9 +1264,13 @@ class MPC:
         # construct lower bound here 
         lagrange1 = lagrange_mult_x_lb_sym.T @ (opt_solution - lbx) #positive @ negative
         lagrange2 = lagrange_mult_x_ub_sym.T @ (ubx - opt_solution)  # positive @ negative                                
-        lagrange3 = lagrange_mult_g_sym.T @ cs.vertcat(self.state_const_list, -self.cbf_const_list) # opposite signs 
+        lagrange3 = lagrange_mult_g_sym.T @ cs.vertcat(self.state_const_list, -self.cbf_const_list) 
         #SHOULD I HAVE self.cbf_const_list be negative here?
-        #WHAT IS WRONG???????????????????????????????
+        #no it was already g(x)=<0
+        # means lag multiplier is lambda>=0
+        # so we get lambda.T@g(x)
+        # if self.cbf_const_list didnt have a minus infront it would be g(x)>=0, but the according lagrangians wouldnt hold
+        
  
         # theta_vector = cs.vertcat(self.P_diag, self.rnn.get_flat_parameters())
         theta_vector = cs.vertcat(self.rnn.get_flat_parameters())
@@ -1351,15 +1358,19 @@ class RLclass:
         radii,
         modes,
         mode_params,
+        slack_penalty
         ):
             # Store random seed for reproducibility
             self.seed = seed
 
             # Create the environment
             self.env = env()
+            
+            # Penalty in RL stagecost on slacks
+            self.slack_penalty = slack_penalty
 
             # Initialize MPC and obstacle‐motion classes 
-            self.mpc = MPC(layers_list, horizon, positions, radii)
+            self.mpc = MPC(layers_list, horizon, positions, radii, self.slack_penalty)
             self.obst_motion = ObstacleMotion(positions, modes, mode_params)
             
             # Parameters of experiments and states
@@ -1461,6 +1472,7 @@ class RLclass:
                     file_path = os.path.join(target_folder, filename)
                     # Save the matplotlib figure 
                     fig.savefig(file_path)
+                    plt.close(fig)
                     print(f"Figure saved as: {file_path}")
             else:
                 print("Figure not saved")
@@ -1480,7 +1492,8 @@ class RLclass:
                 radii         : list of length m
                 constraints_x : scalar for plotting window
                 out_path      : path to save the .gif
-                """
+                """ 
+                
             # Number of time steps T and number of obstacles m
             T, m = obs_positions.shape[:2]
             # Extract only the (x,y) positions of the system over time
@@ -1489,18 +1502,17 @@ class RLclass:
             fig, ax = plt.subplots()
             ax.set_aspect("equal", "box")
             ax.grid(True)
-            ax.set_xlabel("$x$")
-            ax.set_ylabel("$y$")
-            ax.set_title("system + Moving Obstacles")
-
+            ax.set_xlabel(r"$x$")
+            ax.set_ylabel(r"$y$")
+            ax.set_title(r"System + Moving Obstacles")
             # Set fixed window of gif based on constraints_x
             span = constraints_x
             ax.set_xlim(-1.1*span, +0.1*span)
             ax.set_ylim(-1.1*span, +0.1*span)
 
             # Prepare the system path (line) and current position (dot)
-            line, = ax.plot([], [], "o-", lw=2, label="system path")
-            dot,  = ax.plot([], [], "ro", ms=6,    label="system")
+            line, = ax.plot([], [], "o-", lw=2, label=r"system path")
+            dot,  = ax.plot([], [], "ro", ms=6,    label=r"system")
 
             # Get a set of distinct colors for obstacles
             cmap   = plt.get_cmap("tab10")
@@ -1562,7 +1574,7 @@ class RLclass:
             B_update = B_update.squeeze(-1)
 
             # Build labels for the first four diagonal P elements
-            labels = [f'P[{i},{i}]' for i in range(4)]
+            labels = [f"P[{i},{i}]" for i in range(4)]
             print(f"labels: {labels}")
 
             # The remaining columns correspond to RNN parameter updates
@@ -1570,30 +1582,37 @@ class RLclass:
             # Compute mean absolute update magnitude across RNN parameters for each iteration
             # take mean across rows (7,205) --> (7,)
             mean_mag = np.mean(np.abs(nn_B_update), axis=1)
+            
+            # #legend helper function
+            # def safe_legend(loc="best", **kwargs):
+            #     handles, labls = plt.gca().get_legend_handles_labels()
+            #     if labls:
+            #         plt.legend(loc=loc, **kwargs)
 
             # Plot updates for P parameters
             fig_p = plt.figure()
             for idx, lbl in enumerate(labels):
                 plt.plot(B_update[:, idx], "o-", label=lbl)
-            plt.xlabel('Update iteration')
-            plt.ylabel('B_update')
-            plt.title('P parameter B_update over training')
+            plt.xlabel("Update iteration")
+            plt.ylabel("B_update")
+            plt.title("P parameter B_update over training")
             plt.legend()
             plt.grid(True)
+            # safe_legend(loc="upper right", fontsize="small")
             plt.tight_layout()
-            self.save_figures([(fig_p, 'P_B_update_over_time')], experiment_folder)
+            self.save_figures([(fig_p, "P_B_update_over_time")], experiment_folder)
             plt.close(fig_p)
 
             # Plot the RNN mean
             fig_nn = plt.figure()
-            plt.plot(mean_mag, "o-", label='mean |NN_B_update|')
-            plt.xlabel('Update iteration')
-            plt.ylabel('Mean absolute B_update')
-            plt.title('rnn mean acoss rnn params B_update magnitude over training')
+            plt.plot(mean_mag, "o-", label="mean abs(NN_B_update)")
+            plt.xlabel("Update iteration")
+            plt.ylabel("Mean absolute B_update")
+            plt.title("RNN mean across RNN params B_update magnitude over training")
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            self.save_figures([(fig_nn, 'NN_mean_B_update_over_time')], experiment_folder)
+            self.save_figures([(fig_nn, "NN_mean_B_update_over_time")], experiment_folder)
             plt.close(fig_nn)
         
         def ADAM(self, iteration, gradient, exp_avg, exp_avg_sq,
@@ -1988,139 +2007,153 @@ class RLclass:
             
             return (
                 state.T @ Qstage @ state
-                + action.T @ Rstage @ action + np.sum(9e3 *S)
+                + action.T @ Rstage @ action + np.sum(self.slack_penalty *S)
             )
         
         def evaluation_step(self, params, experiment_folder, episode_duration):
+            """
+            Run an evaluation episode using the current parameters and plot results.
+            Args:
+                params (dict):
+                    Dictionary of system and RNN parameters.
+                experiment_folder (str):
+                    Path to the experiment folder where results will be saved.
+                episode_duration (int):
+                    Number of steps in the evaluation episode.
+            """
+            
+            state, _ = self.env.reset(seed=self.seed, options={})
+            self.obst_motion.reset()
+            
+            states_eval = [state]
+            actions_eval = []
+            stage_cost_eval = []
+            
+            xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
+            
+            hidden_in_VMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
+                    for i in range(len(self.mpc.rnn.layers_list)-2)
+                    ]
+            
+            obs_positions = [self.obst_motion.current_positions()]
+            
+            self.x_prev_VMPC        = cs.DM()  
+            self.lam_x_prev_VMPC    = cs.DM()  
+            self.lam_g_prev_VMPC    = cs.DM()  
+
+            for i in range(episode_duration):
+                action, _, hidden_in_VMPC = self.V_MPC(params=params, x=state, xpred_list=xpred_list, ypred_list=ypred_list, hidden_in=hidden_in_VMPC)
+
+                statsv = self.solver_inst.stats()
+                if statsv["success"] == False:
+                    print("V_MPC NOT SUCCEEDED in EVALUATION")
                 
-                state, _ = self.env.reset(seed=self.seed, options={})
-                self.obst_motion.reset()
+                action = cs.fmin(cs.fmax(cs.DM(action), -1), 1)
+                stage_cost_eval.append(self.stage_cost(action, state, self.S_VMPC))
                 
-                states_eval = [state]
-                actions_eval = []
-                stage_cost_eval = []
-                
+                # print(f"evaluation step {i}, action: {action}, slack: {np.sum(5e4*self.S_VMPC)}")
+                state, _, done, _, _ = self.env.step(action)
+                states_eval.append(state)
+                actions_eval.append(action)
+
+                _ = self.obst_motion.step()
                 xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
-                
-                hidden_in_VMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
-                        for i in range(len(self.mpc.rnn.layers_list)-2)
-                        ]
-                
-                obs_positions = [self.obst_motion.current_positions()]
-                
-                self.x_prev_VMPC        = cs.DM()  
-                self.lam_x_prev_VMPC    = cs.DM()  
-                self.lam_g_prev_VMPC    = cs.DM()  
 
-                for i in range(episode_duration):
-                    action, _, hidden_in_VMPC = self.V_MPC(params=params, x=state, xpred_list=xpred_list, ypred_list=ypred_list, hidden_in=hidden_in_VMPC)
+                obs_positions.append(self.obst_motion.current_positions())
 
-                    statsv = self.solver_inst.stats()
-                    if statsv["success"] == False:
-                        print("V_MPC NOT SUCCEEDED in EVALUATION")
-                    
-                    action = cs.fmin(cs.fmax(cs.DM(action), -1), 1)
-                    stage_cost_eval.append(self.stage_cost(action, state, self.S_VMPC))
-                    
-                    # print(f"evaluation step {i}, action: {action}, slack: {np.sum(5e4*self.S_VMPC)}")
-                    state, _, done, _, _ = self.env.step(action)
-                    states_eval.append(state)
-                    actions_eval.append(action)
+            states_eval = np.array(states_eval)
+            actions_eval = np.array(actions_eval)
+            stage_cost_eval = np.array(stage_cost_eval)
+            stage_cost_eval = stage_cost_eval.reshape(-1)
+            obs_positions = np.array(obs_positions) 
+            
+            sum_stage_cost = np.sum(stage_cost_eval)
+            print(f"Stage Cost: {sum_stage_cost}")
 
-                    _ = self.obst_motion.step()
-                    xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
+            figstates=plt.figure()
+            plt.plot(
+                states_eval[:, 0], states_eval[:, 1],
+                "o-"
+            )
 
-                    obs_positions.append(self.obst_motion.current_positions())
+            # Plot the obstacle
+            for (cx, cy), r in zip(self.mpc.rnn.obst.positions, self.mpc.rnn.obst.radii):
+                        circle = plt.Circle((cx, cy), r, color="k", fill=False, linewidth=2)
+                        plt.gca().add_patch(circle)
+            plt.gca().add_patch(circle)
+            plt.xlim([-CONSTRAINTS_X[0], 0])
+            plt.ylim([-CONSTRAINTS_X[1], 0])
 
-                states_eval = np.array(states_eval)
-                actions_eval = np.array(actions_eval)
-                stage_cost_eval = np.array(stage_cost_eval)
-                stage_cost_eval = stage_cost_eval.reshape(-1)
-                obs_positions = np.array(obs_positions) 
+            # Set labels and title
+            plt.xlabel(r"$x$")
+            plt.ylabel(r"$y$")
+            plt.title(r"Trajectories")
+            plt.legend()
+            plt.axis("equal")
+            plt.grid()
+            self.save_figures([(figstates,
+            f"states_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg")],
+            experiment_folder, "Evaluation")
 
-                figstates=plt.figure()
-                plt.plot(
-                    states_eval[:, 0], states_eval[:, 1],
-                    "o-"
-                )
-
-                # Plot the obstacle
-                for (cx, cy), r in zip(self.mpc.rnn.obst.positions, self.mpc.rnn.obst.radii):
-                            circle = plt.Circle((cx, cy), r, color="k", fill=False, linewidth=2)
-                            plt.gca().add_patch(circle)
-                plt.gca().add_patch(circle)
-                plt.xlim([-CONSTRAINTS_X[0], 0])
-                plt.ylim([-CONSTRAINTS_X[1], 0])
-
-                # Set labels and title
-                plt.xlabel("$x$")
-                plt.ylabel("$y$")
-                plt.title("Trajectories")
-                plt.legend()
-                plt.axis("equal")
-                plt.grid()
-
-                figactions=plt.figure()
-                plt.plot(actions_eval[:, 0], "o-", label="Action 1")
-                plt.plot(actions_eval[:, 1], "o-", label="Action 2")
-                plt.xlabel("Iteration $k$")
-                plt.ylabel("Action")
-                plt.title("Actions")
-                plt.legend()
-                plt.grid()
-                plt.tight_layout()
+            figactions=plt.figure()
+            plt.plot(actions_eval[:, 0], "o-", label=r"Action 1")
+            plt.plot(actions_eval[:, 1], "o-", label=r"Action 2")
+            plt.xlabel(r"Iteration $k$")
+            plt.ylabel(r"Action")
+            plt.title(r"Actions")
+            plt.legend()
+            plt.grid()
+            plt.tight_layout()
+            self.save_figures([(figactions,
+            f"actions_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg")],
+            experiment_folder,"Evaluation")
 
 
-                figstagecost=plt.figure()
-                plt.plot(stage_cost_eval, "o-")
-                plt.xlabel("Iteration $k$")
-                plt.ylabel("Cost")
-                plt.title("Stage Cost")
-                plt.legend()
-                plt.grid()
-                plt.tight_layout()
-                
-                figsvelocity=plt.figure()
-                plt.plot(states_eval[:, 2], "o-", label="Velocity x")
-                plt.plot(states_eval[:, 3], "o-", label="Velocity y")    
-                plt.xlabel("Iteration $k$")
-                plt.ylabel("Velocity Value")
-                plt.title("Velocity Plot")
-                plt.legend()
-                plt.grid()
-                plt.tight_layout()
-                
-                sum_stage_cost = np.sum(stage_cost_eval)
-                print(f"Stage Cost: {sum_stage_cost}")
-                
-                figs = [
-                                (figstates, f"states_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
-                                (figactions, f"actions_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
-                                (figstagecost, f"stagecost_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
-                                (figsvelocity, f"velocity_MPCeval_{self.eval_count}_S_{sum_stage_cost}.png")
-                ]
+            figstagecost=plt.figure()
+            plt.plot(stage_cost_eval, "o-")
+            plt.xlabel(r"Iteration $k$")
+            plt.ylabel(r"Cost")
+            plt.title(r"Stage Cost")
+            plt.legend()
+            plt.grid()
+            plt.tight_layout()
+            self.save_figures([(figstagecost,
+            f"stagecost_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg")],
+            experiment_folder, "Evaluation")
+            
+            figsvelocity=plt.figure()
+            plt.plot(states_eval[:, 2], "o-", label=r"Velocity x")
+            plt.plot(states_eval[:, 3], "o-", label=r"Velocity y")    
+            plt.xlabel(r"Iteration $k$")
+            plt.ylabel(r"Velocity Value")
+            plt.title(r"Velocity Plot")
+            plt.legend()
+            plt.grid()
+            plt.tight_layout()
+            self.save_figures([(figsvelocity,
+            f"velocity_MPCeval_{self.eval_count}_S_{sum_stage_cost}.svg")],
+            experiment_folder, "Evaluation")
+            
+            
+            target_folder = os.path.join(experiment_folder, "evaluation")
+            out_gif = os.path.join(target_folder, f"system_and_obstacle_{self.eval_count}_SC_{sum_stage_cost}.gif")
+            self. make_system_obstacle_animation(
+            states_eval,
+            obs_positions,
+            self.mpc.rnn.obst.radii,
+            CONSTRAINTS_X[0],
+            out_gif,
+            )
 
+            self.update_learning_rate(sum_stage_cost, params)
 
-                self.save_figures(figs, experiment_folder, "Evaluation")
-                plt.close("all")
-                
-                target_folder = os.path.join(experiment_folder, "evaluation")
-                out_gif = os.path.join(target_folder, f"system_and_obstacle_{self.eval_count}_SC_{sum_stage_cost}.gif")
-                self. make_system_obstacle_animation(
-                states_eval,
-                obs_positions,
-                self.mpc.rnn.obst.radii,
-                CONSTRAINTS_X[0],
-                out_gif,
-                )
+            self.eval_count += 1
 
-                self.update_learning_rate(sum_stage_cost, params)
-
-                self.eval_count += 1
-
-                return 
+            return 
         
         def parameter_updates(self, params, B_update_avg):
+            
+            #TODO: Finish commenting and cleaning this funciton and onwards
 
             """
             function responsible for carryin out parameter updates after each episode
@@ -2137,7 +2170,7 @@ class RLclass:
 
             # alpha_vec is resposible for the updates
             # alpha_vec = cs.vertcat(self.alpha*np.ones(3), self.alpha, self.alpha, self.alpha*np.ones(theta_vector_num.shape[0]-5)*1e-2)
-            alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0])*1e-2)
+            alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]))
             # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]-2), self.alpha,self.alpha*1e-5)
             
             print(f"B_update_avg:{B_update_avg}")
@@ -2225,6 +2258,8 @@ class RLclass:
             self.error_happened = False
             self.eval_count = 1
             
+            #TODO: Review how hidden states are initialized
+            
             hidden_in_VMPCrand = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
                  for i in range(len(self.mpc.rnn.layers_list)-2)
                  ]
@@ -2266,7 +2301,7 @@ class RLclass:
 
 
                 S = solution[self.na * (self.horizon) + self.ns * (self.horizon+1):]
-                stage_cost = self.stage_cost(action=u,x=x, S=self.S_VMPC_rand)
+                stage_cost = self.stage_cost(action=u,state=x, S=self.S_VMPC_rand)
                 
                 # enviroment update step
                 x, _, done, _, _ = self.env.step(u)
@@ -2377,51 +2412,62 @@ class RLclass:
                         plt.ylim([-CONSTRAINTS_X[1], 0])
 
                         # Set labels and title
-                        plt.xlabel("$x$")
-                        plt.ylabel("$y$")
-                        plt.title("Trajectories of states while policy is trained$")
+                        plt.xlabel(r"$x$")
+                        plt.ylabel(r"$y$")
+                        plt.title(r"Trajectories of states while policy is trained$")
                         plt.legend()
                         plt.axis("equal")
                         plt.grid()
+                        self.save_figures([(figstate,
+                            f"position_plotat_{i}")],
+                            experiment_folder, "Learning")
 
 
                         figvelocity=plt.figure()
-                        plt.plot(states[:, 2], "o-", label="Velocity x")
-                        plt.plot(states[:, 3], "o-", label="Velocity y")    
-                        plt.xlabel("Iteration $k$")
-                        plt.ylabel("Velocity Value")
-                        plt.title("Velocity Plot")
+                        plt.plot(states[:, 2], "o-", label=r"Velocity x")
+                        plt.plot(states[:, 3], "o-", label=r"Velocity y")    
+                        plt.xlabel(r"Iteration $k$")
+                        plt.ylabel(r"Velocity Value")
+                        plt.title(r"Velocity Plot")
                         plt.legend()
                         plt.grid()
                         plt.tight_layout()
-                        # plt.show()
+                        self.save_figures([(figvelocity,
+                            f"figvelocity{i}")],
+                            experiment_folder, "Learning")
 
                         # Plot TD
                         indices = np.arange(len(TD_temp))
                         figtdtemp = plt.figure(figsize=(10, 5))
-                        plt.scatter(indices,TD_temp, label='TD')
+                        plt.scatter(indices,TD_temp, label=r"TD")
                         plt.yscale('log')
-                        plt.title("TD Over Training (Log Scale) - Colored by Proximity")
-                        plt.xlabel("Iteration $k$")
-                        plt.ylabel("TD")
+                        plt.title(r"TD Over Training (Log Scale) - Colored by Proximity")
+                        plt.xlabel(r"Iteration $k$")
+                        plt.ylabel(r"TD")
                         plt.legend()
                         plt.grid(True)
+                        self.save_figures([(figtdtemp,
+                            f"TD_plotat_{i}")],
+                            experiment_folder, "Learning")
 
                         figactions=plt.figure()
-                        plt.plot(actions[:, 0], "o-", label="Action 1")
-                        plt.plot(actions[:, 1], "o-", label="Action 2")
-                        plt.xlabel("Iteration $k$")
-                        plt.ylabel("Action")
-                        plt.title("Actions")
+                        plt.plot(actions[:, 0], "o-", label=r"Action 1")
+                        plt.plot(actions[:, 1], "o-", label=r"Action 2")
+                        plt.xlabel(r"Iteration $k$")
+                        plt.ylabel(r"Action")
+                        plt.title(r"Actions")
                         plt.legend()
                         plt.grid()
                         plt.tight_layout()
+                        self.save_figures([(figactions,
+                            f"action_plotat_{i}")],
+                            experiment_folder, "Learning")
 
                         gradst = np.asarray(grad_temp)
                         gradst = gradst.squeeze(-1)
 
 
-                        labels = [f'P[{i},{i}]' for i in range(4)]
+                        labels = [f"P[{i},{i}]" for i in range(4)]
                         nn_grads = gradst[:, 4:]
                         # take mean across rows (7,205) --> (7,)
                         mean_mag = np.mean(np.abs(nn_grads), axis=1)
@@ -2430,37 +2476,32 @@ class RLclass:
                         
                         for idx, lbl in enumerate(labels):
                                 plt.plot(gradst[:, idx], "o-", label=lbl)
-                        plt.xlabel('Iteration $k$')
-                        plt.ylabel('P gradient')
-                        plt.title('P parameter gradients over training')
+                        plt.xlabel(r"Iteration $k$")
+                        plt.ylabel(r"P gradient")
+                        plt.title(r"P parameter gradients over training")
                         plt.legend()
                         plt.grid(True)
                         plt.tight_layout()
+                        self.save_figures([(P_figgrad,
+                            f"P_grad_plotat_{i}")],
+                            experiment_folder, "Learning")
 
 
 
                         NN_figgrad = plt.figure()
-                        plt.plot(mean_mag, "o-", label='mean |rnn grad|')
+                        plt.plot(mean_mag, "o-", label=r"mean abs(rnn grad)")
 
-                        plt.xlabel('Iteration $k$')
-                        plt.ylabel('rnn Mean absolute gradient')
-                        plt.title('rnn mean acoss rnn params gradient magnitude over training')
+                        plt.xlabel(r"Iteration $k$")
+                        plt.ylabel(r"rnn Mean absolute gradient")
+                        plt.title(r"rnn mean acoss rnn params gradient magnitude over training")
                         plt.legend()
                         plt.grid(True)
                         plt.tight_layout()
+                        self.save_figures([(NN_figgrad,
+                            f"NN_grad_plotat_{i}")],
+                            experiment_folder, "Learning")
                         # plt.show()
 
-                        figures_training = [
-                            (figstate, f"position_plotat_{i}"),
-                            (figvelocity, f"velocity_plotat_{i}"),
-                            (figtdtemp, f"TD_plotat_{i}"),
-                            (figactions, f"action_plotat_{i}"),
-                            (P_figgrad, f"P_grad_plotat_{i}"),
-                            (NN_figgrad, f"NN_grad_plotat_{i}"),
-                            ]
-                        self.save_figures(figures_training, experiment_folder, "Learning")
-                        plt.close("all")
-                        
                         target_folder = os.path.join(experiment_folder, "learning_process")
                         out_gif = os.path.join(target_folder, f"system_and_obstacle_{self.eval_count}_SC_{sum_stage_cost_history[-1]}.gif")
                         self. make_system_obstacle_animation(
@@ -2535,41 +2576,51 @@ class RLclass:
        
 
             figP = plt.figure(figsize=(10, 5))
-            plt.plot(params_history_P[:, 0, 0], label=r"$P[1,1]$")
-            plt.plot(params_history_P[:, 1, 1], label=r"$P[2,2]$")
-            plt.plot(params_history_P[:, 2, 2], label=r"$P[3,3]$")
-            plt.plot(params_history_P[:, 3, 3], label=r"$P[4,4]$")
+            plt.plot(params_history_P[:, 0, 0], label=r"$P_{1,1}$")
+            plt.plot(params_history_P[:, 1, 1], label=r"$P_{2,2}$")
+            plt.plot(params_history_P[:, 2, 2], label=r"$P_{3,3}$")
+            plt.plot(params_history_P[:, 3, 3], label=r"$P_{4,4}$")
             # plt.title("Parameter: P",        fontsize=24)
-            plt.xlabel("Update Number",     fontsize=20)
-            plt.ylabel("Value",             fontsize=20)
+            plt.xlabel(r"Update Number",     fontsize=20)
+            plt.ylabel(r"Value",             fontsize=20)
             plt.xticks(fontsize=12)
             plt.yticks(fontsize=12)
             plt.legend(fontsize=16)
             plt.grid()
             plt.tight_layout()
+            self.save_figures([(figP,
+                   f"P.svg")],
+                 experiment_folder)
+            
 
             figstagecost = plt.figure()
-            plt.plot(sum_stage_cost_history, 'o', label="Stage Cost")
+            plt.plot(sum_stage_cost_history, 'o', label=r"Stage Cost")
             plt.yscale('log')
             # plt.title("Stage Cost Over Training (Log Scale)", fontsize=24)
-            plt.xlabel("Episode Number",                    fontsize=20)
-            plt.ylabel("Stage Cost",                        fontsize=20)
+            plt.xlabel(r"Episode Number",                    fontsize=20)
+            plt.ylabel(r"Stage Cost",                        fontsize=20)
             plt.xticks(fontsize=12)
             plt.yticks(fontsize=12)
             plt.legend(fontsize=16)
             plt.grid(True)
             plt.tight_layout()
+            self.save_figures([(figstagecost,
+                   f"stagecost.svg")],
+                 experiment_folder)
             
 
             figtd = plt.figure()
-            plt.plot(TD_history, 'o', label="TD")
+            plt.plot(TD_history, 'o', label=r"TD")
             plt.yscale('log')
-            plt.title("TD Over Training (Log Scale)")
-            plt.xlabel("Episode Number")
-            plt.ylabel("TD")
+            plt.title(r"TD Over Training (Log Scale)")
+            plt.xlabel(r"Episode Number")
+            plt.ylabel(r"TD")
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
+            self.save_figures([(figtd,
+                   f"TD.svg")],
+                 experiment_folder)
 
             cost = np.array(sum_stage_cost_history)
             episodes = np.arange(len(cost))
@@ -2587,36 +2638,28 @@ class RLclass:
             ax = figstagecost_nice.add_subplot(1,1,1)
 
             # running mean
-            ax.plot(episodes, running_mean, '-', linewidth=2, label=f"Stage Cost mean ({window}-ep)")
+            ax.plot(episodes, running_mean, '-', linewidth=2, label=rf"Stage Cost mean ({window}-ep)")
 
             # ±1σ band
             ax.fill_between(episodes,
                             running_mean - running_std,
                             running_mean + running_std,
                             alpha=0.3,
-                            label=f"Stage Cost std ({window}-ep)")
+                            label=rf"Stage Cost std ({window}-ep)")
 
             if np.any(cost > 0):
                 ax.set_yscale('log')
 
-            ax.set_xlabel("Episode Number", fontsize=20)
-            ax.set_ylabel("Stage Cost",     fontsize=20)
+            ax.set_xlabel(r"Episode Number", fontsize=20)
+            ax.set_ylabel(r"Stage Cost",     fontsize=20)
             ax.tick_params(labelsize=12)
             ax.grid(True)
             ax.legend(fontsize=16)
             figstagecost_nice.tight_layout()
+            self.save_figures([(figstagecost_nice,
+                   f"stagecost_smoothed.svg")],
+                 experiment_folder)
 
-
-            figures_to_save = [
-                (figP, "P"),
-                (figstagecost, "stagecost"),
-                (figstagecost_nice, "stagecost_smoothed"),
-                (figtd, "TD")
-
-            ]
-            self.save_figures(figures_to_save, experiment_folder)
-            plt.close("all")
-            
             return params
         
         

@@ -26,6 +26,3 @@ CONSTRAINTS_X = np.array([
 CONSTRAINTS_U = 1
 
 SEED = 69
-
-
-

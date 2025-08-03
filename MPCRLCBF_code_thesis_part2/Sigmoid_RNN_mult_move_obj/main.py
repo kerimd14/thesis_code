@@ -1,7 +1,7 @@
-
+import multiprocessing
 import os
 import copy
-
+import optuna
 import numpy as np
 import casadi as cs
 
@@ -18,10 +18,9 @@ from Functions import (
     run_simulation,
     run_simulation_randomMPC,
     generate_experiment_notes,
+    objective,
+    save_best_results
 )
-
-
-
 
 
 def main():
@@ -34,9 +33,9 @@ def main():
     seed = SEED
 
     # Noise / exploration schedule
-    initial_noise_scale = 15
-    noise_variance = 10
-    decay_at_end = 0.1
+    initial_noise_scale = 20
+    noise_variance = 5
+    decay_at_end = 0.01
     
     num_episodes = 3000 
     episode_update_freq = 10  # frequency of updates (e.g. update every 10 episodes)
@@ -46,6 +45,7 @@ def main():
     # RL hyper-parameters
     alpha = 1e-1       # initial learning rate
     gamma = 0.95       # discount factor
+    slack_penalty = 9e3  # penalty on slack variables in CBF constraints
     
     # Learning rate scheduler
     # patience = number of epochs with no improvement after which learning rate will be reduced
@@ -58,7 +58,7 @@ def main():
     replay_buffer_size = episode_duration * 10  # buffer holding number of episodes (e.g. hold 10 episodes)
     
     #name of folder where the experiment is saved
-    experiment_folder = "RNN_mult_move_obj_experiment_64"
+    experiment_folder = "RNN_mult_move_obj_experiment_67"
     
     #check if file exists already, if yes raise an exception
     if os.path.exists(experiment_folder):
@@ -128,6 +128,7 @@ def main():
         radii,
         modes,
         copy.deepcopy(mode_params),
+        slack_penalty,
     )
     
     # run simulation to get the initial policy before training
@@ -143,6 +144,7 @@ def main():
         radii=radii,
         modes=modes,
         mode_params=copy.deepcopy(mode_params),
+        slack_penalty=slack_penalty,
     )
     
     # use RL to train the RNN CBF with MPC
@@ -163,6 +165,7 @@ def main():
         radii,
         modes,
         copy.deepcopy(mode_params),
+        slack_penalty,
     )
     trained_params = rl_agent.rl_trainingloop(
         episode_duration=episode_duration,
@@ -186,6 +189,7 @@ def main():
         radii=radii,
         modes=modes,
         mode_params=copy.deepcopy(mode_params),
+        slack_penalty=slack_penalty,
     )
     
     #save experiment configuration and results
@@ -215,6 +219,7 @@ def main():
         copy.deepcopy(mode_params),
         positions,
         radii,
+        slack_penalty,
     )
 
     # append final stage-cost to folder name
@@ -222,8 +227,34 @@ def main():
     os.rename(experiment_folder, experiment_folder + suffix)
     
     
+# if __name__ == "__main__":
+#     main()
+BASE_DIR = "optuna_runs_1"
 if __name__ == "__main__":
-    main()
+    
+    os.makedirs(BASE_DIR, exist_ok=True)
 
+    storage_path = os.path.join(BASE_DIR, "optuna.db")
+    storage_uri  = f"sqlite:///{storage_path}"
+    
+    # optuna.delete_study(study_name="my_rnn_mpc_study", storage="sqlite:///optuna_runs/optuna.db")
+    study = optuna.create_study(
+        storage=storage_uri,  
+        study_name="rnn_mpc_study",
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(),
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
+        load_if_exists=True,   # <-- resume if the DB file already exists
+    )
+    optuna.logging.set_verbosity(optuna.logging.INFO)
+    
+    #n_jobs = 1 to run trials sequentially, running in parallel is not supported in this context
+    # matplotlib and casadi are not thread-safe
+    study.optimize(objective, n_trials=50, n_jobs = 1)
 
+    print("Best trial:",  study.best_trial.number)
+    print("  Value: ",    study.best_value)
+    print("  Params:",    study.best_params)
+    
+    save_best_results(study)
 

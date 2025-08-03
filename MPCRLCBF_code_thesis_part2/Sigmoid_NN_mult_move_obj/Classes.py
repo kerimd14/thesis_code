@@ -988,7 +988,7 @@ class MPC:
         qlagrange = self.objective + lagrange1 + lagrange2 + lagrange3
 
         #computing derivative of lagrangian for A
-        _, qlagrange_sens = cs.hessian(qlagrange, theta_vector)
+        qlagrange_hessian, qlagrange_sens = cs.hessian(qlagrange, theta_vector)
 
         #transpose it becase cs.hessian gives it differently than cs.jacobian
         qlagrange_sens = qlagrange_sens
@@ -1010,25 +1010,65 @@ class MPC:
             ['qlagrange_sens']
         )
 
-        # qlagrange_fn_hessian = cs.Function(
-        #     "qlagrange_fn_hessian",
-        #     [
-        #         self.A_sym, self.B_sym, self.b_sym, self.Q_sym, self.R_sym,
-        #         self.V_sym, self.P_sym, lagrange_mult_x_lb_sym, lagrange_mult_x_ub_sym, 
-        #         lagrange_mult_g_sym, X_flat, U_flat, S_flat, self.nn.get_flat_parameters()
-        #     ],
+        qlagrange_fn_hessian = cs.Function(
+            "qlagrange_fn_hessian",
+            [
+                self.A_sym, self.B_sym, self.b_sym, self.Q_sym, self.R_sym,
+                self.V_sym, self.P_sym, lagrange_mult_x_lb_sym, lagrange_mult_x_ub_sym, 
+                lagrange_mult_g_sym, X_flat, U_flat, S_flat, self.nn.get_flat_parameters(),
+                self.xpred_hor, self.ypred_hor
+            ],
 
-        #     [qlagrange_hessian],
-        #     [
-        #         'A_sym', 'B_sym', 'b_sym', 'Q_sym', 'R_sym','V_sym', 'P_sym', 'lagrange_mult_x_lb_sym', 
-        #         'lagrange_mult_x_ub_sym', 'lagrange_mult_g_sym', 'X', 'U', 'S', 'inputs_NN'
-        #     ],
-        #     ['qlagrange_hessian']
-        # )
+            [qlagrange_hessian],
+            [
+                'A_sym', 'B_sym', 'b_sym', 'Q_sym', 'R_sym','V_sym', 'P_sym', 'lagrange_mult_x_lb_sym', 
+                'lagrange_mult_x_ub_sym', 'lagrange_mult_g_sym', 'X', 'U', 'S', 'inputs_NN',
+                'xpred_hor', 'ypred_hor'
+            ],
+            ['qlagrange_hessian']
+        )
 
 
-        return qlagrange_fn, _
+        return qlagrange_fn, qlagrange_fn_hessian
     
+    # def qp_solver_fn(self):
+    #     """
+    #     Constructs QP solve for parameter updates
+    #     """
+
+    #     Hessian_sym = cs.MX.sym("Hessian", self.theta.shape[0]*self.theta.shape[0])
+    #     p_gradient_sym = cs.MX.sym("gradient", self.theta.shape[0])
+
+    #     delta_theta = cs.MX.sym("delta_theta", self.theta.shape[0])
+    #     theta = cs.MX.sym("delta_theta", self.theta.shape[0])
+
+    #     lambda_reg = 1e-6
+
+    #     qp = {
+    #         "x": cs.vertcat(delta_theta),
+    #         "p": cs.vertcat(theta, Hessian_sym, p_gradient_sym),
+    #         "f": 0.5*delta_theta.T @ Hessian_sym.reshape((self.theta.shape[0], self.theta.shape[0])) @ delta_theta +  p_gradient_sym.T @ (delta_theta) + lambda_reg/2 * delta_theta.T @ delta_theta, 
+    #         "g": theta + delta_theta,
+    #     }
+
+    #     opts = {
+    #         "error_on_fail": False,
+    #         "print_time": False,
+    #         "verbose": False,
+    #         "max_io": False,
+    #         "osqp": {
+    #             "eps_abs": 1e-9,
+    #             "eps_rel": 1e-9,
+    #             "max_iter": 10000,
+    #             "eps_prim_inf": 1e-9,
+    #             "eps_dual_inf": 1e-9,
+    #             "polish": True,
+    #             "scaling": 100,
+    #             "verbose": False,
+    #         },
+    #     }
+
+    #     return cs.qpsol('solver','osqp', qp, opts)
     def qp_solver_fn(self):
         """
         Constructs QP solve for parameter updates
@@ -1121,7 +1161,7 @@ class RLclass:
             self.solver_inst = self.mpc.MPC_solver()
 
             #get parameter sensitivites
-            self.qlagrange_fn_jacob, _ = self.mpc.generate_symbolic_mpcq_lagrange()
+            self.qlagrange_fn_jacob, self.qlagrange_fn_hessian = self.mpc.generate_symbolic_mpcq_lagrange()
 
             #decay_rate 
             self.decay_rate = decay_rate
@@ -1688,7 +1728,7 @@ class RLclass:
 
                 return 
         
-        def parameter_updates(self, params, B_update_avg):
+        def parameter_updates(self, params, A_update_avg, B_update_avg):
 
             """
             function responsible for carryin out parameter updates after each episode
@@ -1700,16 +1740,19 @@ class RLclass:
             
             theta_vector_num = cs.vertcat(params["nn_params"])
 
-
-            identity = np.eye(theta_vector_num.shape[0])
+            L  = self.cholesky_added_multiple_identity(A_update_avg)
+            A_update_chom = L @ L.T
+            
+            # identity = np.eye(theta_vector_num.shape[0])
 
             # print(f"before updates : {theta_vector_num}")
 
             # alpha_vec is resposible for the updates
             # alpha_vec = cs.vertcat(self.alpha*np.ones(3), self.alpha, self.alpha, self.alpha*np.ones(theta_vector_num.shape[0]-5)*1e-2)
-            alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0])*1e-2)
+            alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]))
             # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]-2), self.alpha,self.alpha*1e-5)
-            
+            cond_number = np.linalg.cond(A_update_chom)  
+            print("cond (svd) =", cond_number)
             print(f"B_update_avg:{B_update_avg}")
 
             dtheta, self.exp_avg, self.exp_avg_sq = self.ADAM(self.adam_iter, B_update_avg, self.exp_avg, self.exp_avg_sq, alpha_vec, 0.9, 0.999)
@@ -1718,7 +1761,7 @@ class RLclass:
             print(f"dtheta: {dtheta}")
 
             # uncostrained update to compare to the qp update
-            y = np.linalg.solve(identity, dtheta)
+            y = np.linalg.solve(A_update_chom, B_update_avg)
             theta_vector_num_toprint = theta_vector_num - (y)#self.alpha * y
             print(f"theta_vector_num no qp: {theta_vector_num_toprint}")
 
@@ -1730,10 +1773,10 @@ class RLclass:
             
             # constrained update qp update
             solution = self.qp_solver(
-                    p=cs.vertcat(theta_vector_num, identity.flatten(), dtheta),
+                    p=cs.vertcat(theta_vector_num, A_update_chom.flatten(), B_update_avg),
                     # lbg=cs.vertcat(np.zeros(4), -np.inf*np.ones(theta_vector_num.shape[0]-4)),
                     # ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
-                    lbg=cs.vertcat(-np.inf*np.ones(theta_vector_num.shape[0])),
+                    lbg= cs.vertcat(-np.inf*np.ones(theta_vector_num.shape[0])),
                     ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
                     # ubx = ubx,
                     # lbx = lbx
@@ -1779,7 +1822,7 @@ class RLclass:
             grad_temp = []
             obs_positions = [self.obst_motion.current_positions()]
 
-      
+            A_update_buffer = deque(maxlen=replay_buffer)
             B_update_buffer = deque(maxlen=replay_buffer)
             
 
@@ -1872,11 +1915,36 @@ class RLclass:
                     X=X, U=U, S=S, inputs_NN=params["nn_params"],
                     xpred_hor=xpred_list, ypred_hor=ypred_list
                 )['qlagrange_sens']
-
-                # first order update
+                
+                qlagrange_numeric_hess=  self.qlagrange_fn_hessian(
+                    A_sym=params["A"],
+                    B_sym=params["B"],
+                    b_sym=params["b"],
+                    Q_sym = params["Q"],
+                    R_sym = params["R"],
+                    P_sym = params["P"],
+                    lagrange_mult_x_lb_sym=lam_lbx,
+                    lagrange_mult_x_ub_sym=lam_ubx,
+                    lagrange_mult_g_sym=lagrange_mult_g,
+                    X=X, U=U, S=S, inputs_NN=params["nn_params"],
+                    xpred_hor=xpred_list, ypred_hor=ypred_list
+                )['qlagrange_hessian']
+                
+                
+                outer_product = qlagrange_numeric_jacob @ qlagrange_numeric_jacob.T
+                # second order update
                 B_update = -TD*qlagrange_numeric_jacob
                 grad_temp.append(qlagrange_numeric_jacob)
                 B_update_buffer.append(B_update)
+                
+                
+                if qlagrange_numeric_hess.nnz() > 0:
+                    A_update = -TD*qlagrange_numeric_hess + outer_product
+                    A_update_buffer.append(A_update) 
+                    
+                else:
+                    A_update = outer_product
+                    A_update_buffer.append(A_update)
                         
                 stage_cost_history.append(stage_cost)
                 if self.error_happened == False:
@@ -1899,11 +1967,11 @@ class RLclass:
                         
                         # self.evaluation_step(S=S, params=params, experiment_folder=experiment_folder, episode_duration=episode_duration)
                         print (f"updatedddddd")
-                        
+                        A_update_avg = np.mean(A_update_buffer, 0)
                         B_update_avg = np.mean(B_update_buffer, 0)
                         B_update_history.append(B_update_avg)
 
-                        params = self.parameter_updates(params = params, B_update_avg = B_update_avg)
+                        params = self.parameter_updates(params = params, A_update_avg=A_update_avg, B_update_avg = B_update_avg)
                         
                         params_history_P.append(params["P"])
 
@@ -1922,7 +1990,7 @@ class RLclass:
 
                     # plotting the trajectories under the noisy policies explored
                     current_episode = i // episode_duration
-                    if (current_episode % 50) == 0:
+                    if (current_episode % 10) == 0:
                         states = np.array(states)
                         actions = np.asarray(actions)
                         TD_temp = np.asarray(TD_temp)
