@@ -393,7 +393,7 @@ def run_simulation(alpha_values, env):
 
         states = np.array(states)
 
-        plt.plot(states[:, 0], states[:, 1],"o-" ,label=f"Trajectory (alpha={alpha})")
+        plt.plot(states[:, 0], states[:, 1],"o-" ,label=rf"$\gamma={alpha}$")
 
         trajectory_length = calculate_trajectory_length(states)
         print(f"Trajectory length for alpha={alpha}: {trajectory_length} units")
@@ -405,12 +405,13 @@ def run_simulation(alpha_values, env):
     plt.ylim([-5, 0])
 
     # Labels
-    plt.xlabel("$x$ (m)")
-    plt.ylabel("$y$ (m)")
+    plt.xlabel('$X$',fontsize=20); plt.ylabel('$Y$', fontsize=20)
     plt.legend()
     plt.axis("equal")
     plt.grid()
     plt.show()
+    plt.xticks(fontsize=12)
+    plt.yticks(fontsize=12)
 
 # Run simulations for different values of alpha
 alpha_values = [0.1,0.2, 0.3, 0.9]

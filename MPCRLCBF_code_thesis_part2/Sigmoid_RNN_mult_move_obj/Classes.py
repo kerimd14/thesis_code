@@ -318,7 +318,7 @@ class ObstacleMotion:
     
     
 class RNN:
-    def __init__(self, layers_list, positions, radii, horizon):
+    def __init__(self, layers_list, positions, radii, horizon, mode_params):
         #TODO: Finish commenting and cleaning this funciton and onwards
         """
         Build an Elman-style RNN for CBF-based MPC.
@@ -357,6 +357,7 @@ class RNN:
         """
         self.obst         = Obstacles(positions, radii)
         self.layers_list  = layers_list
+        self.ns = NUM_STATES
         # four lists of CasADi symbols, one per Rrnn layer:
         self.rnn_weights_ih = []
         self.rnn_weights_hh = []
@@ -371,6 +372,10 @@ class RNN:
         
         self.positions = positions
         self.radii     = radii
+        #defining bounds for normalizations of positions of the object
+        # self.bounds =[ self.obst.mode_params[i]["bounds"] for i in range(self.obst.obstacle_numm) ]
+        # self.bounds = np.array(self.bounds)
+        self.bounds = np.array([mode_params[i]["bounds"] for i in range(self.obst.obstacle_num)])  # shape (m, 2)
             
 
     def relu(self, x):
@@ -397,13 +402,18 @@ class RNN:
         Normalizes based on maximum and minimum values of the states and h(x) values.
 
         """
+        # split the input into three to normalize each seprately
+        x_raw    = rnn_input[:self.ns]
+        h_raw    = rnn_input[self.ns:self.ns+self.obst.obstacle_num]
+        pos_x    = rnn_input[self.ns+self.obst.obstacle_num:self.ns+2*self.obst.obstacle_num]
+        pos_y    = rnn_input[self.ns+2*self.obst.obstacle_num:self.ns+3*self.obst.obstacle_num]
   
         # x_norm = (nn_input[:4] - mu_states) / sigma_states
         
         x_min  = cs.DM([-CONSTRAINTS_X[0], -CONSTRAINTS_X[0], -CONSTRAINTS_X[0], -CONSTRAINTS_X[0]]) # minimum values of the states
         x_max = cs.DM([0, 0, 0, 0]) # maximum values of the states
         
-        x_norm = (rnn_input[:4]-x_min)/(x_max-x_min) # normalize the states based on the maximum values
+        x_norm = (x_raw-x_min)/(x_max-x_min) # normalize the states based on the maximum values
         
         h_max_list = []
         for (px, py), r in zip(self.positions, self.radii):
@@ -411,22 +421,34 @@ class RNN:
             dy = x_min[1] - py
             h_max_i = dx**2 + dy**2 - r**2
             h_max_list.append(h_max_i)
-        
-        h_raw = rnn_input[4:]             
+                    
         h_norm_list = []
         
         h_raw = cs.reshape(h_raw, -1, 1)  # reshape to (m, 1) where m is the number of obstacles
 
         h_raw_split = cs.vertsplit(h_raw)  # returns a list of (1x1) MX elements
-
+        
         for i, h_i in enumerate(h_raw_split):
             h_max_i = h_max_list[i]
             h_norm_i = h_i / h_max_i
             h_norm_i = cs.fmin(cs.fmax(h_norm_i, 0), 1)
             h_norm_list.append(h_norm_i)
+        
+        # bounds[i] == (xmin_i, xmax_i)
+        bounds_DM = cs.DM(self.bounds)  # shape (m,2)
+        pos_x_norm = [
+            (pos_x[i] - bounds_DM[i,0]) / (bounds_DM[i,1] - bounds_DM[i,0])
+            for i in range(self.obst.obstacle_num)
+        ]
+        pos_y_norm = [
+            (pos_y[i] - bounds_DM[i,0]) / (bounds_DM[i,1] - bounds_DM[i,0])
+            for i in range(self.obst.obstacle_num)
+        ]
+        pos_norm = cs.vertcat(*pos_x_norm, *pos_y_norm)
+        
             
         h_norm = cs.vertcat(*h_norm_list)
-        return cs.vertcat(x_norm, h_norm)
+        return cs.vertcat(x_norm, h_norm, pos_norm)
 
     # ─── low‐level linear + cell ─────────────────────────────────────────────────
     def linear(self, inp, weight, bias=None):
@@ -502,7 +524,8 @@ class RNN:
         Inputs
         ------
         h_current                     : MX, shape (hidden_dim_i x 1)
-        x_t = (x, h_cbf(x_t))        : MX, shape (input_dim x 1)
+        obs_positions?
+        x_t = (x, h_cbf(x_t), obs_positions)        : MX, shape (input_dim x 1)
         Wih_i                        : MX, shape (hidden_dim_i x input_dim_i)
         bih_i                        : MX, shape (hidden_dim_i x 1)
         Whh_i                        : MX, shape (hidden_dim_i x hidden_dim_i) (for i < output layer)
@@ -678,8 +701,8 @@ class RNN:
                 Whh_vals.append(Whh_v)
             
             else:
-                bound = 0.5*np.sqrt(6.0 / (fan_out + fan_out))
-                Wih_v = self.np_random.uniform(-bound, bound, size=(fan_out, fan_in))
+                bound = np.sqrt(6.0 / (fan_out + fan_out))
+                Wih_v = 0.1*self.np_random.uniform(-bound, bound, size=(fan_out, fan_in))
                 Wih_vals.append(Wih_v)
             
             bih_v = np.zeros((fan_out, 1))
@@ -827,7 +850,7 @@ class MPC:
     ns = NUM_STATES # num of states
     na = NUM_INPUTS # num of inputs
 
-    def __init__(self, layers_list, horizon, positions, radii, slack_penalty):
+    def __init__(self, layers_list, horizon, positions, radii, slack_penalty, mode_params):
         """
         Initialize the MPC class with parameters.
         
@@ -877,7 +900,7 @@ class MPC:
         self.V_sym = cs.MX.sym("V0")
         
         # instantiate the RNN
-        self.rnn = RNN(layers_list, positions, radii, horizon)
+        self.rnn = RNN(layers_list, positions, radii, horizon, mode_params)
         self.m = self.rnn.obst.obstacle_num  # number of obstacles
         
         # predicted obstacle velocities over horizon
@@ -956,6 +979,9 @@ class MPC:
            (X, xpred_hor, ypred_hor)
            -->flattened sequence: [input[0], input[1], ..., input[horizon]]
            where input at time step k: input[k] = [x_k; h_i(x_k, xpred_hor[k*m:(k+1)*m], ypred_hor[k*m:(k+1)*m]) for i in range(m)]
+           
+           i dont do make one flat input sized for the RNN but i make a couple of them because i need to feed it into the rnn_fwd
+           i need to do this since i need to use RNN to calculate a number of these params 
         """
         X = cs.MX.sym("X", self.ns, self.horizon+1)
 
@@ -966,9 +992,18 @@ class MPC:
                           self.xpred_hor[t*self.m:(t+1)*self.m], 
                           self.ypred_hor[t*self.m:(t+1)*self.m]) 
                       for h_i in self.h_funcs]           # m×1 each
+            obs_x = self.xpred_hor[t*self.m:(t+1)*self.m]
+            obs_y = self.ypred_hor[t*self.m:(t+1)*self.m]
+            
+            obs_x_list = cs.vertsplit(obs_x)  # [MX(1×1), ..., MX(1×1)]
+            obs_y_list = cs.vertsplit(obs_y)
+            
             inter.append(x_t)                            # ns×1
             inter.extend(cbf_t)                          # m scalars
+            inter.extend(obs_x_list)
+            inter.extend(obs_y_list)
 
+        
         flat_in = cs.vertcat(*inter)  # ((ns+m)*horizon)×1
         return cs.Function("flat_input", [X, self.xpred_hor, self.ypred_hor], [flat_in], ["X",  "xpred_list", "ypred_list"], ["flat_in"])
     
@@ -1046,9 +1081,10 @@ class MPC:
         stage_cost = sum(
             (self.X_sym[:, k].T @ self.Q_sym @ self.X_sym[:, k] + 
             self.U_sym[:, k].T @ self.R_sym @ self.U_sym[:, k] + 
-            self.weight_cbf * self.S_sym[m,k])
+            self.weight_cbf * self.S_sym[m,k]) #+ self.alpha_list[k*self.m + m]*(self.X_sym[0,k]**2 + self.X_sym[1,k]**2))
             for m in range (self.m) for k in range(self.horizon)
         )
+         
         terminal_cost = cs.bilin((self.P_sym), self.X_sym[:, -1])
         self.objective = self.V_sym + terminal_cost + stage_cost
 
@@ -1062,13 +1098,14 @@ class MPC:
         # why doesnt work? --> idk made it in line
         stage_cost = sum(
             (self.X_sym[:, k].T @ self.Q_sym @ self.X_sym[:, k] + 
-            self.U_sym[:, k].T @ self.R_sym @ self.U_sym[:, k])
-            for k in range(self.horizon)
+            self.U_sym[:, k].T @ self.R_sym @ self.U_sym[:, k]) 
+            #+ self.alpha_list[k*self.m + m]*cs.sqrt(self.X_sym[0,k]**2 + self.X_sym[1,k]**2))
+            for m in range (self.m) for k in range(self.horizon)
         )
+        
         #slack penalty
         terminal_cost = cs.bilin((self.P_sym), self.X_sym[:, -1])
-
-
+        
         self.objective_noslack = self.V_sym + terminal_cost + stage_cost
 
         return
@@ -1272,16 +1309,21 @@ class MPC:
         # if self.cbf_const_list didnt have a minus infront it would be g(x)>=0, but the according lagrangians wouldnt hold
         
  
-        # theta_vector = cs.vertcat(self.P_diag, self.rnn.get_flat_parameters())
-        theta_vector = cs.vertcat(self.rnn.get_flat_parameters())
+        theta_vector = cs.vertcat(self.P_diag, self.rnn.get_flat_parameters())
+        # theta_vector = cs.vertcat(self.rnn.get_flat_parameters())
 
         self.theta = theta_vector
 
         qlagrange = self.objective + lagrange1 + lagrange2 + lagrange3
 
         #computing derivative of lagrangian for A
-        _, qlagrange_sens = cs.hessian(qlagrange, theta_vector)
-
+        print(f"BEFORE THE JACOBIAN")
+        # _, qlagrange_sens = cs.hessian(qlagrange, theta_vector)
+        qlagrange_sens = cs.gradient(qlagrange, theta_vector)
+        n_rows = qlagrange_sens.size1()
+        n_cols = qlagrange_sens.size2()
+        print(f"Shape is ({n_rows}, {n_cols})")
+        print(f"AFTER THE JACOBIAN")
         qlagrange_fn = cs.Function(
             "qlagrange_fn",
             [
@@ -1293,14 +1335,16 @@ class MPC:
             [qlagrange_sens]
         )
 
-        return qlagrange_fn, _
+        return qlagrange_fn
     
     def qp_solver_fn(self):
         """
           Construct and return a small QP solver (OSQP) for constrained parameter updates.
         """
 
-        Hessian_sym = cs.MX.sym("Hessian", self.theta.shape[0]*self.theta.shape[0])
+        # Hessian_sym = cs.MX.sym("Hessian", self.theta.shape[0]*self.theta.shape[0]) # making this hessian take a lot 
+        n = int(self.theta.shape[0])  # dimension of theta
+        Hessian = cs.DM.eye(n)
         p_gradient_sym = cs.MX.sym("gradient", self.theta.shape[0])
 
         delta_theta = cs.MX.sym("delta_theta", self.theta.shape[0])
@@ -1310,8 +1354,8 @@ class MPC:
 
         qp = {
             "x": cs.vertcat(delta_theta),
-            "p": cs.vertcat(theta, Hessian_sym, p_gradient_sym),
-            "f": 0.5*delta_theta.T @ Hessian_sym.reshape((self.theta.shape[0], self.theta.shape[0])) @ delta_theta +  
+            "p": cs.vertcat(theta, p_gradient_sym),
+            "f": 0.5*delta_theta.T @ Hessian.reshape((self.theta.shape[0], self.theta.shape[0])) @ delta_theta +  
                 p_gradient_sym.T @ (delta_theta) + lambda_reg/2 * delta_theta.T @ delta_theta, 
             "g": theta + delta_theta,
         }
@@ -1335,6 +1379,43 @@ class MPC:
 
         return cs.qpsol('solver','osqp', qp, opts)
     
+    
+    def make_phi_fn(self):
+        """
+        Return a CasADi Function φ(X, xpred_hor, ypred_hor, h0, params)
+        which returns the vector of shape (m*horizon,1):
+           φ_i^k = h_i(x_{k+1}) − h_i(x_k) + α_{k,i}·h_i(x_k)
+        (no slack added)
+        """
+        # reuse exactly your cbf_const_noslack internals, but collect phi's
+        
+        
+        m = len(self.h_funcs)
+        X_flat = cs.reshape(self.X_sym, -1, 1)  # Flatten 
+        U_flat = cs.reshape(self.U_sym, -1, 1)
+        cons=[]
+        for k in range(self.horizon):
+            xk = self.X_sym[:, k]      # 4×1
+            uk = self.U_sym[:, k]      # 2×1
+            phi_k_list = []
+            for i, h_i in enumerate(self.h_funcs):
+                
+                alpha_ki = self.alpha_list[k*m + i]        # MX-scalar
+
+
+                h_x     = h_i(xk, self.xpred_hor[k*self.m:(k+1)*self.m], self.ypred_hor[k*self.m:(k+1)*self.m])              # h(x_k)
+                x_next  = self.dynamics_f(xk, uk)          # f(x_k, u_k)
+                h_xnext = h_i(x_next, self.xpred_hor[(k+1)*self.m:(k+2)*self.m], self.ypred_hor[(k+1)*self.m:(k+2)*self.m])                       # h(x_{k+1})
+
+                # phi_i = h(x_{k+1}, k+1) − h(x_k, k) + alpha*h(x_k, k) TIME DEPENDENT h()
+                phi_i = h_xnext - h_x + alpha_ki * h_x
+                phi_k_list.append(phi_i)
+
+            phi_k = cs.vertcat(*phi_k_list) 
+            cons.append(phi_k)# m×1
+        return cs.Function("phi_fn",
+                           [X_flat, U_flat, self.xpred_hor, self.ypred_hor, *self.hid_syms, *self.rnn.get_flat_parameters_list()],
+                           [*cons])           # m×1
 
 ####################### RL #######################
 
@@ -1370,9 +1451,11 @@ class RLclass:
             self.slack_penalty = slack_penalty
 
             # Initialize MPC and obstacle‐motion classes 
-            self.mpc = MPC(layers_list, horizon, positions, radii, self.slack_penalty)
+            self.mpc = MPC(layers_list, horizon, positions, radii, self.slack_penalty, mode_params)
             self.obst_motion = ObstacleMotion(positions, modes, mode_params)
             
+            # layer list of input
+            self.rnn_input_size = layers_list[0]
             # Parameters of experiments and states
             self.ns = self.mpc.ns
             self.na = self.mpc.na
@@ -1410,11 +1493,12 @@ class RLclass:
             self.solver_inst_random =self.mpc.MPC_solver_rand() # noisy MPC (the MPC with exploration noise)
             
             # Symbolic function to get the gradient of the MPC Lagrangian
-            self.qlagrange_fn_jacob, _ = self.mpc.generate_symbolic_mpcq_lagrange()
+            self.qlagrange_fn_jacob = self.mpc.generate_symbolic_mpcq_lagrange()
+            print(f"generated the function")
 
             # Create CasADi qp solver instance once for reuse
             self.qp_solver = self.mpc.qp_solver_fn() # QP for constrained parameter updates
-
+            print(f"casadi func created")
             # Learning‐rate scheduling
             self.decay_rate      = decay_rate
             self.patience_threshold = patience_threshold
@@ -1426,15 +1510,17 @@ class RLclass:
             
             # ADAM
             # theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), self.params_innit["rnn_params"])
-            # theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), self.params_innit["rnn_params"])
-            theta_vector_num = cs.vertcat(self.params_innit["rnn_params"])
+            theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), self.params_innit["rnn_params"])
+            # theta_vector_num = cs.vertcat(self.params_innit["rnn_params"])
             self.exp_avg = np.zeros(theta_vector_num.shape[0])
             self.exp_avg_sq = np.zeros(theta_vector_num.shape[0])
             self.adam_iter = 1
             
+            print(f"before make rnn step")
             # hidden state 1 function 
             self.get_hidden_func = self.mpc.rnn.make_rnn_step()
             
+            print(f"before flat input")
             self.flat_input_fn = self.mpc.make_flat_input_fn()
             
             
@@ -1448,6 +1534,17 @@ class RLclass:
             self.x_prev_VMPCrandom  = cs.DM()  
             self.lam_x_prev_VMPCrandom = cs.DM()  
             self.lam_g_prev_VMPCrandom = cs.DM()
+            
+            print(f"before make phi fn")
+            #construct function to access h(x_{k+1},k+1)-alpha*h(x_{k},k)
+            self.phi_func = self.mpc.make_phi_fn()
+            
+            print(f"before make h functions")
+            # construct list to extract h(x_{k},k)
+            self.h_func_list = self.mpc.rnn.obst.make_h_functions()
+            
+            print(f"initialization done")
+            
             
         
         def save_figures(self, figures, experiment_folder, save_in_subfolder=False):
@@ -1802,9 +1899,9 @@ class RLclass:
             # calculate new hidden state of the RNN for V_MPC
             X = cs.reshape(solution["x"][:self.ns * (self.horizon+1)], self.ns, self.horizon + 1)
             flat_input = self.flat_input_fn(X, xpred_list, ypred_list)
-            x_t0 = flat_input[:1*self.ns+self.mpc.rnn.obst.obstacle_num]
+            x_t0 = flat_input[:self.rnn_input_size]
             params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])
-            *hidden_t1, _ = self.get_hidden_func(*hidden_in, x_t0, *params_rnn)
+            *hidden_t1, alpha_list = self.get_hidden_func(*hidden_in, x_t0, *params_rnn) #alpha_list is list of outputs of NN
             
             # warmstart variables for next iteration
             self.x_prev_VMPC     = solution["x"]
@@ -1814,7 +1911,7 @@ class RLclass:
             # remember the slack variables for stage cost computation (in the evaluation stage cost)
             self.S_VMPC = solution["x"][self.na * (self.horizon) + self.ns * (self.horizon+1):]
 
-            return u_opt, solution["f"], hidden_t1
+            return u_opt, solution["f"], hidden_t1, alpha_list
         
         def V_MPC_rand(self, params, x, rand, xpred_list, ypred_list, hidden_in):
             """
@@ -1880,9 +1977,9 @@ class RLclass:
             # calculate new hidden state of the RNN for V_MPC_rand
             X = cs.reshape(solution["x"][:self.ns * (self.horizon+1)], self.ns, self.horizon + 1)
             flat_input = self.flat_input_fn(X, xpred_list, ypred_list)
-            x_t0 = flat_input[:1*self.ns+self.mpc.rnn.obst.obstacle_num]
+            x_t0 = flat_input[:self.rnn_input_size]
             params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])  
-            *hidden_t1, _ = self.get_hidden_func(*hidden_in, x_t0, *params_rnn)
+            *hidden_t1, alpha_list = self.get_hidden_func(*hidden_in, x_t0, *params_rnn) #alpha_list is list of outputs of NN
             
             # warmstart variables for next iteration
             self.x_prev_VMPCrandom = solution["x"]
@@ -1892,7 +1989,7 @@ class RLclass:
             # remember the slack variables for stage cost computation (in the RL stage cost)
             self.S_VMPC_rand = solution["x"][self.na * (self.horizon) + self.ns * (self.horizon+1):]
 
-            return u_opt, hidden_t1
+            return u_opt, hidden_t1, alpha_list
 
         def Q_MPC(self, params, action, x, xpred_list, ypred_list, hidden_in):
             
@@ -1931,7 +2028,7 @@ class RLclass:
                 hidden_t1 (list of MX):
                     Updated hidden states after one RNN forward pass.
                     """
-
+                     
             # Build input‐action bounds (note horizon−1 controls remain free after plugging in `action`)
             U_lower_bound = -np.ones(self.na * (self.horizon-1))
             U_upper_bound = np.ones(self.na * (self.horizon-1))
@@ -1973,9 +2070,9 @@ class RLclass:
             # calculate new hidden state of the RNN for Q_MPC
             X = cs.reshape(solution["x"][:self.ns * (self.horizon+1)], self.ns, self.horizon + 1)
             flat_input = self.flat_input_fn(X, xpred_list, ypred_list)
-            x_t0 = flat_input[:1*self.ns+self.mpc.rnn.obst.obstacle_num]
+            x_t0 = flat_input[:self.rnn_input_size]
             params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])  
-            *hidden_t1, _ = self.get_hidden_func(*hidden_in, x_t0, *params_rnn)
+            *hidden_t1, _ = self.get_hidden_func(*hidden_in, x_t0, *params_rnn) 
             
             # warmstart variables for next iteration
             self.x_prev_QMPC = solution["x"]
@@ -1984,7 +2081,7 @@ class RLclass:
             
             return solution["x"], solution["f"], lagrange_mult_g, lam_lbx, lam_ubx, lam_p, hidden_t1
             
-        def stage_cost(self, action, state, S):
+        def stage_cost(self, action, state, S, hx):
             """
             Computes the stage cost : L(s,a).
             
@@ -2004,10 +2101,13 @@ class RLclass:
             # same as the MPC ones
             Qstage = np.diag([10, 10, 10, 10])
             Rstage = np.diag([1, 1])
+            hx = np.array(hx)
+            
+            violations = np.clip(-hx, 0, None)
             
             return (
                 state.T @ Qstage @ state
-                + action.T @ Rstage @ action + np.sum(self.slack_penalty *S)
+                + action.T @ Rstage @ action + np.sum(self.slack_penalty *S) + np.sum(7e4*violations)
             )
         
         def evaluation_step(self, params, experiment_folder, episode_duration):
@@ -2028,8 +2128,14 @@ class RLclass:
             states_eval = [state]
             actions_eval = []
             stage_cost_eval = []
-            
             xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
+            hx = [ float(hf(cs.DM(state), xpred_list[0:self.mpc.rnn.obst.obstacle_num], ypred_list[0:self.mpc.rnn.obst.obstacle_num])) 
+                             for hf in self.h_func_list ] 
+            hx_list = [hx]
+            
+            #for RNN outputs
+            alphas = []
+            
             
             hidden_in_VMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
                     for i in range(len(self.mpc.rnn.layers_list)-2)
@@ -2042,19 +2148,25 @@ class RLclass:
             self.lam_g_prev_VMPC    = cs.DM()  
 
             for i in range(episode_duration):
-                action, _, hidden_in_VMPC = self.V_MPC(params=params, x=state, xpred_list=xpred_list, ypred_list=ypred_list, hidden_in=hidden_in_VMPC)
+                action, _, hidden_in_VMPC, alpha = self.V_MPC(params=params, x=state, xpred_list=xpred_list, ypred_list=ypred_list, hidden_in=hidden_in_VMPC)
 
                 statsv = self.solver_inst.stats()
                 if statsv["success"] == False:
                     print("V_MPC NOT SUCCEEDED in EVALUATION")
+                alphas.append(alpha)
                 
                 action = cs.fmin(cs.fmax(cs.DM(action), -1), 1)
-                stage_cost_eval.append(self.stage_cost(action, state, self.S_VMPC))
+                stage_cost_eval.append(self.stage_cost(action, state, self.S_VMPC, hx))
                 
                 # print(f"evaluation step {i}, action: {action}, slack: {np.sum(5e4*self.S_VMPC)}")
                 state, _, done, _, _ = self.env.step(action)
                 states_eval.append(state)
                 actions_eval.append(action)
+                hx = [ float(hf(cs.DM(state), xpred_list[0:self.mpc.rnn.obst.obstacle_num], ypred_list[0:self.mpc.rnn.obst.obstacle_num])) 
+                             for hf in self.h_func_list ]
+                hx_list.append(hx) 
+                # hx_list.append(np.array([ float(hf(cs.DM(x), xpred_list[0:self.mpc.rnn.obst.obstacle_num], ypred_list[0:self.mpc.rnn.obst.obstacle_num])) 
+                #              for hf in self.h_func_list ]))
 
                 _ = self.obst_motion.step()
                 xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
@@ -2066,6 +2178,8 @@ class RLclass:
             stage_cost_eval = np.array(stage_cost_eval)
             stage_cost_eval = stage_cost_eval.reshape(-1)
             obs_positions = np.array(obs_positions) 
+            hx_list = np.vstack(hx_list)
+            alphas = np.array(alphas)
             
             sum_stage_cost = np.sum(stage_cost_eval)
             print(f"Stage Cost: {sum_stage_cost}")
@@ -2108,7 +2222,6 @@ class RLclass:
             f"actions_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg")],
             experiment_folder,"Evaluation")
 
-
             figstagecost=plt.figure()
             plt.plot(stage_cost_eval, "o-")
             plt.xlabel(r"Iteration $k$")
@@ -2131,9 +2244,35 @@ class RLclass:
             plt.grid()
             plt.tight_layout()
             self.save_figures([(figsvelocity,
-            f"velocity_MPCeval_{self.eval_count}_S_{sum_stage_cost}.svg")],
+            f"velocity_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg")],
             experiment_folder, "Evaluation")
             
+            for i in range(hx_list.shape[1]):
+                fig_hi = plt.figure()
+                plt.plot(hx_list[:,i], "o", label=rf"$h_{{{i+1}}}(x_k)$")
+                plt.xlabel(r"Iteration $k$")
+                plt.ylabel(rf"$h_{{{i+1}}}(x_k)$")
+                plt.title(rf"Obstacle {i+1}: $h_{{{i+1}}}(x_k)$ Over Time")
+                plt.grid()
+                self.save_figures([(fig_hi,
+                            f"hx_obstacle_{self.eval_count}_SC_{sum_stage_cost}.svg")],
+                            experiment_folder, "Evaluation")
+                
+            # Alphas from RNN
+            fig_alpha = plt.figure()
+            if alphas.ndim == 1:
+                plt.plot(alphas, "o-", label=r"$\alpha(x_k)$")
+            else:
+                for i in range(alphas.shape[1]):
+                    plt.plot(alphas[:,i], "o-", label=rf"$\alpha_{{{i+1}}}(x_k)$")
+            plt.xlabel(r"Iteration $k$")
+            plt.ylabel(r"$\alpha_i(x_k)$")
+            plt.title(r"Neural-Network Outputs $\alpha_i(x_k)$")
+            plt.grid()
+            plt.legend(loc="upper right", fontsize="small")
+            self.save_figures([(fig_alpha,
+                        f"alpha_{self.eval_count}_SC_{sum_stage_cost}.svg")],
+                        experiment_folder, "Evaluation")
             
             target_folder = os.path.join(experiment_folder, "evaluation")
             out_gif = os.path.join(target_folder, f"system_and_obstacle_{self.eval_count}_SC_{sum_stage_cost}.gif")
@@ -2158,25 +2297,29 @@ class RLclass:
             """
             function responsible for carryin out parameter updates after each episode
             """
-            # P_diag = cs.diag(params["P"])
+            P_diag = cs.diag(params["P"])
 
             #vector of parameters which are differenitated with respect to
-            # theta_vector_num = cs.vertcat(P_diag, params["rnn_params"])
-            theta_vector_num = cs.vertcat(params["rnn_params"])
+            theta_vector_num = cs.vertcat(P_diag, params["rnn_params"])
+            # theta_vector_num = cs.vertcat(params["rnn_params"])
 
             identity = np.eye(theta_vector_num.shape[0])
 
             # print(f"before updates : {theta_vector_num}")
 
             # alpha_vec is resposible for the updates
-            # alpha_vec = cs.vertcat(self.alpha*np.ones(3), self.alpha, self.alpha, self.alpha*np.ones(theta_vector_num.shape[0]-5)*1e-2)
-            alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]))
+            alpha_vec = cs.vertcat(self.alpha*np.ones(4), self.alpha*np.ones(theta_vector_num.shape[0]-4)*1e-2)
+            # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]))
             # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]-2), self.alpha,self.alpha*1e-5)
             
             print(f"B_update_avg:{B_update_avg}")
 
             dtheta, self.exp_avg, self.exp_avg_sq = self.ADAM(self.adam_iter, B_update_avg, self.exp_avg, self.exp_avg_sq, alpha_vec, 0.9, 0.999)
             self.adam_iter += 1 
+            
+            # #SGD
+            # dtheta = self.alpha * B_update_avg
+
 
             print(f"dtheta: {dtheta}")
 
@@ -2193,11 +2336,11 @@ class RLclass:
             
             # constrained update qp update
             solution = self.qp_solver(
-                    p=cs.vertcat(theta_vector_num, identity.flatten(), dtheta),
-                    # lbg=cs.vertcat(np.zeros(4), -np.inf*np.ones(theta_vector_num.shape[0]-4)),
-                    # ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
-                    lbg=cs.vertcat(-np.inf*np.ones(theta_vector_num.shape[0])),
+                    p=cs.vertcat(theta_vector_num, dtheta),
+                    lbg=cs.vertcat(np.zeros(4), -np.inf*np.ones(theta_vector_num.shape[0]-4)),
                     ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
+                    # lbg=cs.vertcat(-np.inf*np.ones(theta_vector_num.shape[0])),
+                    # ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
                     # ubx = ubx,
                     # lbx = lbx
                 )
@@ -2212,13 +2355,13 @@ class RLclass:
 
             print(f"theta_vector_num: {theta_vector_num}")
 
-            # P_diag_shape = self.ns*1
-            # #constructing the diagonal posdef P matrix 
-            # P_posdef = cs.diag(theta_vector_num[:P_diag_shape])
+            P_diag_shape = self.ns*1
+            #constructing the diagonal posdef P matrix 
+            P_posdef = cs.diag(theta_vector_num[:P_diag_shape])
 
-            # params["P"] = P_posdef
-            # params["rnn_params"] = theta_vector_num[P_diag_shape:]       
-            params["rnn_params"] = theta_vector_num  
+            params["P"] = P_posdef
+            params["rnn_params"] = theta_vector_num[P_diag_shape:]       
+            # params["rnn_params"] = theta_vector_num  
 
             return params
         
@@ -2242,7 +2385,10 @@ class RLclass:
             B_update_history = []
             grad_temp = []
             obs_positions = [self.obst_motion.current_positions()]
-
+            phi_list = []
+            S_list = []
+            S_list_VMPC = []
+            lag_g_list = []
       
             B_update_buffer = deque(maxlen=replay_buffer)
             
@@ -2252,6 +2398,14 @@ class RLclass:
             actions = []
             
             xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
+            
+            hx =  [ float(hf(cs.DM(x), xpred_list[0:self.mpc.rnn.obst.obstacle_num], ypred_list[0:self.mpc.rnn.obst.obstacle_num])) 
+                             for hf in self.h_func_list ]
+            
+            hx_list = [hx]
+            
+            #for RNN outputs
+            alphas = []
 
             #intialize
             k = 0
@@ -2272,15 +2426,18 @@ class RLclass:
                  for i in range(len(self.mpc.rnn.layers_list)-2)
                  ]
 
+            print(f"trainingloop initialized")
+            
             for i in range(1,episode_duration*num_episodes):  
                 
                 noise = self.noise_scalingfactor*self.noise_scale_by_distance(x[0],x[1])
                 rand = noise * self.np_random.normal(loc=0, scale=self.noise_variance, size = (2,1))
 
-                u, hidden_in_VMPCrand = self.V_MPC_rand(params=params, x=x, rand = rand, xpred_list=xpred_list, 
+                u, hidden_in_VMPCrand, alpha = self.V_MPC_rand(params=params, x=x, rand = rand, xpred_list=xpred_list, 
                                     ypred_list=ypred_list, hidden_in=hidden_in_VMPCrand)
                 u = cs.fmin(cs.fmax(cs.DM(u), -1), 1)
 
+                alphas.append(alpha)
                 actions.append(u)
 
                 statsvrand = self.solver_inst_random.stats()
@@ -2299,22 +2456,23 @@ class RLclass:
                     print("Q_MPC NOT SUCCEEDED")
                     self.error_happened = True
 
-
                 S = solution[self.na * (self.horizon) + self.ns * (self.horizon+1):]
-                stage_cost = self.stage_cost(action=u,state=x, S=self.S_VMPC_rand)
+                stage_cost = self.stage_cost(action=u,state=x, S=self.S_VMPC_rand, hx = hx)
                 
                 # enviroment update step
                 x, _, done, _, _ = self.env.step(u)
 
                 # append trajectory points for plotting
                 states.append(x)
-
+                hx = [ float(hf(cs.DM(x), xpred_list[0:self.mpc.rnn.obst.obstacle_num], ypred_list[0:self.mpc.rnn.obst.obstacle_num])) 
+                             for hf in self.h_func_list ]
+                hx_list.append(hx)
                 #calculate V value
 
                 # print(f"x_2: {x}")
                 # print(f"params_3: {params}")
 
-                _, Vcost, hidden_in_VMPC = self.V_MPC(params=params, x=x, xpred_list=xpred_list, ypred_list=ypred_list, hidden_in=hidden_in_VMPC)
+                _, Vcost, hidden_in_VMPC, _ = self.V_MPC(params=params, x=x, xpred_list=xpred_list, ypred_list=ypred_list, hidden_in=hidden_in_VMPC)
 
                 statsv = self.solver_inst.stats()
                 if statsv["success"] == False:
@@ -2326,6 +2484,18 @@ class RLclass:
 
                 U = solution[self.ns * (self.horizon+1):self.na * (self.horizon) + self.ns * (self.horizon+1)] 
                 X = solution[:self.ns * (self.horizon+1)] 
+                
+                    
+                params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])     
+                phi = self.phi_func(X, 
+                                    U,
+                                    cs.DM(xpred_list), cs.DM(ypred_list), *hidden_in_QMPC, *params_rnn)
+
+                phi_list.append(np.array(phi).reshape(self.horizon, self.mpc.m))
+                
+                S_list.append(S)
+                S_list_VMPC.append(self.S_VMPC_rand)
+                lag_g_list.append(lagrange_mult_g[-S.size1():])
             
                 qlagrange_numeric_jacob=  self.qlagrange_fn_jacob(
                     params["A"],
@@ -2397,6 +2567,8 @@ class RLclass:
                         actions = np.asarray(actions)
                         TD_temp = np.asarray(TD_temp) 
                         obs_positions = np.array(obs_positions)
+                        hx_list = np.vstack(hx_list)
+                        alphas = np.array(alphas)
 
                         figstate=plt.figure()
                         plt.plot(
@@ -2501,6 +2673,34 @@ class RLclass:
                             f"NN_grad_plotat_{i}")],
                             experiment_folder, "Learning")
                         # plt.show()
+                        
+                        
+                        for i in range(hx_list.shape[1]):
+                            fig_hi = plt.figure()
+                            plt.plot(hx_list[:,i], "o", label=rf"$h_{{{i+1}}}(x_k)$")
+                            plt.xlabel(r"Iteration $k$")
+                            plt.ylabel(rf"$h_{{{i+1}}}(x_k)$")
+                            plt.title(rf"Obstacle {i+1}: $h_{{{i+1}}}(x_k)$ Over Time")
+                            plt.grid()
+                            self.save_figures([(fig_hi,
+                                        f"hx_obstacle_plotat_{i}.svg")],
+                                        experiment_folder, "Learning")
+                            
+                        # Alphas from RNN
+                        fig_alpha = plt.figure()
+                        if alphas.ndim == 1:
+                            plt.plot(alphas, "o-", label=r"$\alpha(x_k)$")
+                        else:
+                            for i in range(alphas.shape[1]):
+                                plt.plot(alphas[:,i], "o-", label=rf"$\alpha_{{{i+1}}}(x_k)$")
+                        plt.xlabel(r"Iteration $k$")
+                        plt.ylabel(r"$\alpha_i(x_k)$")
+                        plt.title(r"Neural-Network Outputs $\alpha_i(x_k)$")
+                        plt.grid()
+                        plt.legend(loc="upper right", fontsize="small")
+                        self.save_figures([(fig_alpha,
+                                    f"alpha_plotat_{i}.svg")],
+                                    experiment_folder, "Learning")
 
                         target_folder = os.path.join(experiment_folder, "learning_process")
                         out_gif = os.path.join(target_folder, f"system_and_obstacle_{self.eval_count}_SC_{sum_stage_cost_history[-1]}.gif")
@@ -2553,6 +2753,18 @@ class RLclass:
                     grad_temp = []
                     obs_positions = [self.obst_motion.current_positions()]
                     xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
+                    phi_list = []
+                    S_list = []
+                    S_list_VMPC = []
+                    lag_g_list = []
+                    
+                    
+                    hx =  [ float(hf(cs.DM(x), xpred_list[0:self.mpc.rnn.obst.obstacle_num], ypred_list[0:self.mpc.rnn.obst.obstacle_num])) 
+                             for hf in self.h_func_list ]
+            
+                    hx_list = [hx]
+                    #for RNN outputs
+                    alphas = []
                     
                     print("reset")
                     

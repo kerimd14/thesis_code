@@ -25,7 +25,7 @@ episode_duration= 500
 num_episodes = 1000
 
 # MPC HORIZON
-horizon = 1000
+horizon = 15
 
 replay_buffer= 10*episode_duration #buffer is 5 episodes long
 episode_updatefreq = 10# updates every 3 episodes
@@ -71,11 +71,11 @@ positions = [(-2.0, -1.5),
              (-3.0, -3.0)]
 
 
-radii     = [0.75, 0.75]  
+radii     = [0.7, 0.7]  
 
 modes       = ["step_bounce", "step_bounce"]
 mode_params = [{'bounds': (-4.0, 0.0), 'speed': 2.3, 'dir': 1}, 
-               {'bounds': (-4.0, 1.0), 'speed': 2.0, 'dir': -1}]
+               {'bounds': (-4.0, 1.0), 'speed': 2.1, 'dir': -1}]
 
 # positions = [
 #     ( -1.0, -1.0),  # orbit #1 around origin
@@ -117,7 +117,7 @@ params_innit["nn_params"] = list
 #seems params_innit gets overwritten
 params_original = params_innit.copy() 
 
-experiment_folder_name = "Optimum_MPC_Experiment"
+experiment_folder_name = "Optimum_MPC_Experiment_diff_blah"
 
 #WATCH OUT --> since mode_params was a dict what was happening is that the values of it kept getting changed
 

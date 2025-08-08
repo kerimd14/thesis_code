@@ -19,8 +19,16 @@ def flat_input_fn(mpc, X, horizon, xpred_hor, ypred_hor, m):
     for t in range(horizon):
         x_t    = X[:,t]
         cbf_t  = [h_func for h_func in mpc.rnn.obst.h_obsfunc(x_t, xpred_hor[t*m:(t+1)*m], ypred_hor[t*m:(t+1)*m])]  # m×1 each
+        obs_x = xpred_hor[t*m:(t+1)*m]
+        obs_y =ypred_hor[t*m:(t+1)*m]
+        
+        obs_x_list = cs.vertsplit(obs_x)  # [MX(1×1), ..., MX(1×1)]
+        obs_y_list = cs.vertsplit(obs_y)
+            
         inter.append(x_t)                            # ns×1
         inter.extend(cbf_t)                          # m scalars
+        inter.extend(obs_x_list)
+        inter.extend(obs_y_list)
 
     flat_in = cs.vertcat(*inter) 
 
@@ -42,7 +50,7 @@ def stage_cost_func(action, x, S, slack_penalty):
             )
                 
 
-def MPC_func(x, mpc, params, solver_inst, xpred_list, ypred_list, hidden_in, m, x_prev, lam_x_prev, lam_g_prev):
+def MPC_func(x, mpc, params, solver_inst, xpred_list, ypred_list, hidden_in, m, x_prev, lam_x_prev, lam_g_prev, layers_list):
         
         alpha = []
 
@@ -107,7 +115,7 @@ def MPC_func(x, mpc, params, solver_inst, xpred_list, ypred_list, hidden_in, m, 
         
         flat_input = flat_input_fn(mpc, solution["x"][:mpc.ns * (mpc.horizon+1)], mpc.horizon, xpred_list, ypred_list, m)
         # mpc.horizon*
-        x_t0 = flat_input[:1*mpc.ns+mpc.rnn.obst.obstacle_num]
+        x_t0 = flat_input[:layers_list[0]]
         
         get_hidden_func = mpc.rnn.make_rnn_step()
     
@@ -237,7 +245,7 @@ def run_simulation(params, env, experiment_folder, episode_duration,
     USE the after_updates flag to determine if the simulation is run after the updates or not!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     """
     env = env()
-    mpc = MPC(layers_list, horizon, positions, radii, slack_penalty_eval)
+    mpc = MPC(layers_list, horizon, positions, radii, slack_penalty_eval, mode_params)
     obst_motion = ObstacleMotion(positions, modes, mode_params)
 
    
@@ -281,7 +289,8 @@ def run_simulation(params, env, experiment_folder, episode_duration,
 
         action, _, alpha, g_resid, hidden_in, x_prev, lam_x_prev, lam_g_prev, S = MPC_func(state, mpc, params, solver_inst, 
                                                                                         xpred_list, ypred_list, hidden_in, 
-                                                                                        m, x_prev, lam_x_prev, lam_g_prev)
+                                                                                        m, x_prev, lam_x_prev, lam_g_prev,
+                                                                                        layers_list)
 
         alphas.append(alpha)
 
@@ -406,7 +415,7 @@ def run_simulation(params, env, experiment_folder, episode_duration,
                    f"velocity_{'after' if after_updates else 'before'}.svg")],
                  experiment_folder)
 
-    # Alphas from your RNN
+    # Alphas from RNN
     fig_alpha = plt.figure()
     if alphas.ndim == 1:
         plt.plot(alphas, "o-", label=r"$\alpha(x_k)$")
@@ -415,7 +424,7 @@ def run_simulation(params, env, experiment_folder, episode_duration,
             plt.plot(alphas[:,i], "o-", label=rf"$\alpha_{{{i+1}}}(x_k)$")
     plt.xlabel(r"Iteration $k$")
     plt.ylabel(r"$\alpha_i(x_k)$")
-    plt.title(r"Neural‐Network Outputs $\alpha_i(x_k)$")
+    plt.title(r"Neural-Network Outputs $\alpha_i(x_k)$")
     plt.grid()
     plt.legend(loc="upper right", fontsize="small")
     save_figures([(fig_alpha,
@@ -456,7 +465,7 @@ def run_simulation(params, env, experiment_folder, episode_duration,
     print(f"Saved all figures for {'after' if after_updates else 'before'} run.")
     return stage_cost.sum()
 
-def MPC_func_random(x, mpc, params, solver_inst, rand_noise,  xpred_list, ypred_list, hidden_in, m,  x_prev, lam_x_prev, lam_g_prev):
+def MPC_func_random(x, mpc, params, solver_inst, rand_noise,  xpred_list, ypred_list, hidden_in, m,  x_prev, lam_x_prev, lam_g_prev, layers_list):
         
         alpha = []
         
@@ -514,7 +523,7 @@ def MPC_func_random(x, mpc, params, solver_inst, rand_noise,  xpred_list, ypred_
         
         flat_input = flat_input_fn(mpc, solution["x"][:mpc.ns * (mpc.horizon+1)], mpc.horizon, xpred_list, ypred_list, m)
         # mpc.horizon*
-        x_t0 = flat_input[:1*mpc.ns+mpc.rnn.obst.obstacle_num]
+        x_t0 = flat_input[:layers_list[0]]
         
         get_hidden_func = mpc.rnn.make_rnn_step()
     
@@ -553,7 +562,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration,
     actions = []
     stage_cost = []
     alphas = []
-    mpc = MPC(layers_list, horizon, positions, radii, slack_penalty)
+    mpc = MPC(layers_list, horizon, positions, radii, slack_penalty,mode_params)
     
     xpred_list, ypred_list = obst_motion.predict_states(horizon)
 
@@ -572,7 +581,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration,
     for i in range(episode_duration):
         rand_noise = noise_scale_by_distance(state[0], state[1])*noise_scalingfactor*np_random.normal(loc=0, scale=noise_variance, size = (2,1))
         action, _, alpha, hidden_in, x_prev, lam_x_prev, lam_g_prev, S = MPC_func_random(state, mpc, params, solver_inst, rand_noise, xpred_list, ypred_list, 
-                                                      hidden_in, m, x_prev, lam_x_prev, lam_g_prev)
+                                                      hidden_in, m, x_prev, lam_x_prev, lam_g_prev, layers_list)
 
         # if i<(0.65*2000):
         # else:f
@@ -827,7 +836,7 @@ def run_experiment(exp_config):
     layers_list = [input_dim] + hidden_dims + [output_dim]
     print("RNN layers:", layers_list)
 
-    rnn = RNN(layers_list, positions, radii, mpc_horizon)
+    rnn = RNN(layers_list, positions, radii, mpc_horizon, mode_params)
     params_init["rnn_params"], _, _, _ = rnn.initialize_parameters()
     # keep a copy of the original parameters for later logging
     params_before = params_init.copy()

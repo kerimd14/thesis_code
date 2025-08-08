@@ -885,7 +885,7 @@ class RLclass:
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            self.save_figures([(fig_p, 'P_B_update_over_time')], experiment_folder)
+            self.save_figures([(fig_p, 'P_B_update_over_time.svg')], experiment_folder)
             plt.close(fig_p)
 
             # 2. Plot just the NN mean
@@ -897,7 +897,7 @@ class RLclass:
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            self.save_figures([(fig_nn, 'NN_mean_B_update_over_time')], experiment_folder)
+            self.save_figures([(fig_nn, 'NN_mean_B_update_over_time.svg')], experiment_folder)
             plt.close(fig_nn)
         
         def ADAM(self, iteration, gradient, exp_avg, exp_avg_sq,
@@ -1216,10 +1216,10 @@ class RLclass:
                 print(f"Stage Cost: {sum_stage_cost}")
                 
                 figs = [
-                                (figstates, f"states_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
-                                (figactions, f"actions_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
-                                (figstagecost, f"stagecost_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
-                                (figsvelocity, f"velocity_MPCeval_{self.eval_count}_S_{sum_stage_cost}.png")
+                                (figstates, f"states_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg"),
+                                (figactions, f"actions_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg"),
+                                (figstagecost, f"stagecost_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg"),
+                                (figsvelocity, f"velocity_MPCeval_{self.eval_count}_S_{sum_stage_cost}.svg")
                 ]
 
 
@@ -1346,10 +1346,10 @@ class RLclass:
 
             for i in range(1,episode_duration*num_episodes):
 
-                if i == 143*10*3000:
+                if i == 128*10*3000:
                     self.alpha = self.alpha*0.01
 
-                if i == 145*10*3000:
+                if i == 130*10*3000:
                     self.alpha = self.alpha*0.01    
                 
                 rand = self.noise_scalingfactor*self.np_random.normal(loc=0, scale=self.noise_variance, size = (2,1))
@@ -1572,12 +1572,12 @@ class RLclass:
                         # plt.show()
 
                         figures_training = [
-                            (figstate, f"position_plotat_{i}"),
-                            (figvelocity, f"velocity_plotat_{i}"),
-                            (figtdtemp, f"TD_plotat_{i}"),
-                            (figactions, f"action_plotat_{i}"),
-                            (P_figgrad, f"P_grad_plotat_{i}"),
-                            (NN_figgrad, f"NN_grad_plotat_{i}"),
+                            (figstate, f"position_plotat_{i}.svg"),
+                            (figvelocity, f"velocity_plotat_{i}.svg"),
+                            (figtdtemp, f"TD_plotat_{i}.svg"),
+                            (figactions, f"action_plotat_{i}.svg"),
+                            (P_figgrad, f"P_grad_plotat_{i}.svg"),
+                            (NN_figgrad, f"NN_grad_plotat_{i}.svg"),
                             ]
                         self.save_figures(figures_training, experiment_folder, "Learning")
                         plt.close("all")
@@ -1685,10 +1685,10 @@ class RLclass:
 
 
             figures_to_save = [
-                (figP, "P"),
-                (figstagecost, "stagecost"),
-                (figstagecost_nice, "stagecost_smoothed"),
-                (figtd, "TD")
+                (figP, "P.svg"),
+                (figstagecost, "stagecost.svg"),
+                (figstagecost_nice, "stagecost_smoothed.svg"),
+                (figtd, "TD.svg")
 
             ]
             self.save_figures(figures_to_save, experiment_folder)
