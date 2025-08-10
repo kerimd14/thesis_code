@@ -410,17 +410,29 @@ class RNN:
   
         # x_norm = (nn_input[:4] - mu_states) / sigma_states
         
-        x_min  = cs.DM([-CONSTRAINTS_X[0], -CONSTRAINTS_X[0], -CONSTRAINTS_X[0], -CONSTRAINTS_X[0]]) # minimum values of the states
-        x_max = cs.DM([0, 0, 0, 0]) # maximum values of the states
+        #x_min  = cs.DM([-CONSTRAINTS_X[0], -CONSTRAINTS_X[0], -CONSTRAINTS_X[0], -CONSTRAINTS_X[0]]) # minimum values of the states
+        #x_max = cs.DM([0, 0, 0, 0]) # maximum values of the states
+        Xmax, Ymax = CONSTRAINTS_X[0], CONSTRAINTS_X[1]
+        Vxmax, Vymax = CONSTRAINTS_X[2], CONSTRAINTS_X[3]  
         
-        x_norm = (x_raw-x_min)/(x_max-x_min) # normalize the states based on the maximum values
+        x_min = cs.DM([-Xmax, -Ymax, -Vxmax, -Vymax])
+        x_max = cs.DM([   0.,    0.,  Vxmax,  Vymax ])
+        x_norm = (x_raw-x_min)/(x_max-x_min + 1e-9) # normalize the states based on the maximum values
         
+        # h_max_list = []
+        # for (px, py), r in zip(self.positions, self.radii):
+        #     dx = x_min[0] - px
+        #     dy = x_min[1] - py
+        #     h_max_i = dx**2 + dy**2 - r**2
+        #     h_max_list.append(h_max_i)
+        corners = [
+        (-Xmax, -Ymax), (-Xmax, 0.0),
+        (0.0,   -Ymax), (0.0,   0.0)
+        ]
         h_max_list = []
         for (px, py), r in zip(self.positions, self.radii):
-            dx = x_min[0] - px
-            dy = x_min[1] - py
-            h_max_i = dx**2 + dy**2 - r**2
-            h_max_list.append(h_max_i)
+            d2 = [ (cx - px)**2 + (cy - py)**2 for (cx, cy) in corners ]
+            h_max_list.append(max(d2) - r**2)
                     
         h_norm_list = []
         
@@ -517,9 +529,9 @@ class RNN:
         Returns
         -------
         cs.Function
-            `Rstep(h_current, ..., h_current_K, (x, h_cbf(x_t))= x_t,
+            Rstep(h_current, ..., h_current_K, (x, h_cbf(x_t))= x_t
                    Wih_0, bih_0, Whh_0, ..., Wih_{L}, bih_{L})`
-            → `(h_next_1, ..., h_next_K, y_t)`.
+            → (h_next_1, ..., h_next_K, y_t).
 
         Inputs
         ------
@@ -1078,12 +1090,31 @@ class MPC:
         stage cost: sum_{k,i} [ x.T @ Q @ x + u.T @ R @ u + weight_cbf * S_i]
         terminal cost: x.T @ P @ x
         """
-        stage_cost = sum(
-            (self.X_sym[:, k].T @ self.Q_sym @ self.X_sym[:, k] + 
-            self.U_sym[:, k].T @ self.R_sym @ self.U_sym[:, k] + 
-            self.weight_cbf * self.S_sym[m,k]) #+ self.alpha_list[k*self.m + m]*(self.X_sym[0,k]**2 + self.X_sym[1,k]**2))
-            for m in range (self.m) for k in range(self.horizon)
+        # stage_cost_NOT = sum(
+        #     (self.X_sym[:, k].T @ self.Q_sym @ self.X_sym[:, k] + 
+        #     self.U_sym[:, k].T @ self.R_sym @ self.U_sym[:, k] + 
+        #     self.weight_cbf * self.S_sym[m,k]) #+ self.alpha_list[k*self.m + m]*(self.X_sym[0,k]**2 + self.X_sym[1,k]**2))
+        #     for m in range (self.m) for k in range(self.horizon)
+        # )
+        # print(f"Stage cost previous: {stage_cost_NOT}")
+        
+        quad_cost = sum(
+        self.X_sym[:, k].T @ self.Q_sym @ self.X_sym[:, k]
+         + self.U_sym[:, k].T @ self.R_sym @ self.U_sym[:, k]
+        for k in range(self.horizon)
         )
+
+        # CBF slack (or violation) over objects and time
+        cbf_cost = self.weight_cbf * sum(
+        self.S_sym[m, k]
+        for m in range(self.m)
+        for k in range(self.horizon)
+        )
+        
+        stage_cost = quad_cost + cbf_cost
+        
+        print(f"Stage cost current: {stage_cost}")
+
          
         terminal_cost = cs.bilin((self.P_sym), self.X_sym[:, -1])
         self.objective = self.V_sym + terminal_cost + stage_cost
@@ -1100,7 +1131,7 @@ class MPC:
             (self.X_sym[:, k].T @ self.Q_sym @ self.X_sym[:, k] + 
             self.U_sym[:, k].T @ self.R_sym @ self.U_sym[:, k]) 
             #+ self.alpha_list[k*self.m + m]*cs.sqrt(self.X_sym[0,k]**2 + self.X_sym[1,k]**2))
-            for m in range (self.m) for k in range(self.horizon)
+            for k in range(self.horizon)
         )
         
         #slack penalty
@@ -1269,6 +1300,7 @@ class MPC:
         """
         self.state_const()
         self.objective_method()
+        self.cbf_const()
 
         X_flat = cs.reshape(self.X_sym, -1, 1)  # Flatten 
         U_flat = cs.reshape(self.U_sym, -1, 1)
@@ -1772,7 +1804,7 @@ class RLclass:
 
             return params
 
-        def noise_scale_by_distance(self, x, y, max_radius=3):
+        def noise_scale_by_distance(self, x, y, max_radius=0.5):
             
             
             """
@@ -2107,7 +2139,7 @@ class RLclass:
             
             return (
                 state.T @ Qstage @ state
-                + action.T @ Rstage @ action + np.sum(self.slack_penalty *S) + np.sum(7e4*violations)
+                + action.T @ Rstage @ action + np.sum(self.slack_penalty *S) + np.sum(5e5*violations)
             )
         
         def evaluation_step(self, params, experiment_folder, episode_duration):
@@ -2540,7 +2572,15 @@ class RLclass:
                         # self.evaluation_step(S=S, params=params, experiment_folder=experiment_folder, episode_duration=episode_duration)
                         
                         print (f"updatedddddd")
-                        B_update_avg = np.mean(B_update_buffer, 0)
+                        # B_update_avg = np.mean(B_update_buffer, 0)
+                        
+                        buf = np.asarray(B_update_buffer)            # [N, d]
+                        batch = int(0.3*len(buf))          # pick a size you like
+
+                        # Uniform replay (simple & stable):
+                        idx = self.np_random.choice(len(buf), size=batch, replace=False)
+                        B_update_avg = buf[idx].mean(axis=0)
+                        
                         B_update_history.append(B_update_avg)
 
                         params = self.parameter_updates(params = params, B_update_avg = B_update_avg)

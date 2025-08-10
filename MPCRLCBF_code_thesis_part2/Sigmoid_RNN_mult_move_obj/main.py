@@ -33,7 +33,7 @@ def main():
     seed = SEED
 
     # Noise / exploration schedule
-    initial_noise_scale = 15
+    initial_noise_scale = 10
     noise_variance = 5
     decay_at_end = 0.01
     
@@ -43,9 +43,9 @@ def main():
     print(f"Computed noise decay_rate: {decay_rate:.4f}")
 
     # RL hyper-parameters
-    alpha = 5e-2       # initial learning rate
+    alpha = 8e-3       # initial learning rate
     gamma = 0.95       # discount factor
-    slack_penalty = 5e3  # penalty on slack variables in CBF constraints
+    slack_penalty = 1e3  # penalty on slack variables in CBF constraints
     
     # Learning rate scheduler
     # patience = number of epochs with no improvement after which learning rate will be reduced
@@ -54,11 +54,11 @@ def main():
 
     # Episode / MPC specs
     episode_duration = 150
-    mpc_horizon = 6
+    mpc_horizon = 5
     replay_buffer_size = episode_duration * episode_update_freq  # buffer holding number of episodes (e.g. hold 10 episodes)
     
     #name of folder where the experiment is saved
-    experiment_folder = "RNN_mult_move_obj_experiment_106"
+    experiment_folder = "RNN_mult_move_obj_experiment_118"
     
     #check if file exists already, if yes raise an exception
     # if os.path.exists(experiment_folder):
@@ -98,7 +98,7 @@ def main():
     # ─── Build & initialize RNN CBF ───────────────────────────────────────────
 
     input_dim = NUM_STATES + len(positions) + 2*len(positions) #x+h(x)+ (obs_positions_x + obs_positions_y)
-    hidden_dims = [20, 20, 20]
+    hidden_dims = [16, 16]
     output_dim = len(positions)
     layers_list = [input_dim] + hidden_dims + [output_dim]
     print("RNN layers:", layers_list)

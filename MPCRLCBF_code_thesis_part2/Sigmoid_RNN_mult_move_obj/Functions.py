@@ -107,7 +107,7 @@ def MPC_func(x, mpc, params, solver_inst, xpred_list, ypred_list, hidden_in, m, 
             lbg= lbg,
         )
 
-        g_resid = solution["g"][4:]        # vector of all g(x)
+        g_resid = solution["g"][mpc.ns*mpc.horizon:]        # vector of all g(x)
 
         print(f"g reid: {g_resid}")
 
