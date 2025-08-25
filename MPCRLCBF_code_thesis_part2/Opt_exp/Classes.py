@@ -670,7 +670,7 @@ class MPC:
             "bound_consistency":True,
             "calc_lam_x": True,
             "eval_errors_fatal": True,
-            "error_on_fail": True,
+            "error_on_fail": False,
             "calc_lam_p": True,
             "ipopt": {"max_iter": 500, "print_level": 0, "warm_start_init_point": "yes"},
             #"fatrop": {"max_iter": 500, "print_level": 0, "warm_start_init_point": True},

@@ -25,7 +25,7 @@ episode_duration= 500
 num_episodes = 1000
 
 # MPC HORIZON
-horizon = 15
+horizon = 100
 
 replay_buffer= 10*episode_duration #buffer is 5 episodes long
 episode_updatefreq = 10# updates every 3 episodes
@@ -67,16 +67,44 @@ params_innit = {
 # modes       = ["step_bounce", "step_bounce"]                   # one obstacle, bouncing
 # mode_params = [{"bounds":(-4.0, 1.0), "speed":1.5, "dir": 1},  {"bounds":(-4.0, 1.0), "speed":1.5, "dir": -1}]
 
-positions = [(-2.0, -1.5), 
-             (-3.0, -3.0)]
+# positions = [(-2.0, -2.0), 
+#              (-3.0, -2.0)]
 
 
-radii     = [0.7, 0.7]  
+# radii     = [0.72, 0.72]  
 
-modes       = ["step_bounce", "step_bounce"]
-mode_params = [{'bounds': (-4.0, 0.0), 'speed': 2.3, 'dir': 1}, 
-               {'bounds': (-4.0, 1.0), 'speed': 2.1, 'dir': -1}]
+# modes       = ["step_bounce", "step_bounce"]
+# mode_params = [{'bounds': (-5.0, 1.0), 'speed': 3.8, 'dir': 1}, 
+#                {'bounds': (-5.0, 1.0), 'speed': 3.5, 'dir': -1}]
 
+
+# # positions = [(-2.0, -1.5), (-3.0, -3.0), (-2.0, 0.0)]
+# positions = [(-3.0, -1.5), (-2.0, -3.0)]
+# radii     = [0.72, 0.72]
+# modes     = ["step_bounce", "step_bounce"]
+# mode_params = [
+#     {"bounds": (-4.0,  0.0), "speed": 2.3, "dir":  1},
+#     {"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
+#     # {"bounds": (-2.0,  -2.0), "speed": 0.0, "dir": -1},
+# ]
+positions = [(-2, -2.25)]
+
+
+radii     = [1.5]  
+
+modes       = ["static"]  # one obstacle, static
+
+mode_params = [{'bounds': (-5.0, 1.0), 'speed': 0}]
+
+# positions = [(-2.0, -1.5), (-3.0, -3.0), (-2.0, 0.0)]
+# positions = [(-3.0, -1.5), (-2.0, -3.0)]
+# radii     = [0.72, 0.72]
+# modes     = ["step_bounce", "step_bounce"]
+# mode_params = [
+#     {"bounds": (-4.0,  0.0), "speed": 2.3, "dir":  1},
+#     {"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
+#     # {"bounds": (-2.0,  -2.0), "speed": 0.0, "dir": -1},
+# ]
 # positions = [
 #     ( -1.0, -1.0),  # orbit #1 around origin
 #     (-2.0, 2.0),  # orbit #2 around (–1,1)
@@ -117,7 +145,7 @@ params_innit["nn_params"] = list
 #seems params_innit gets overwritten
 params_original = params_innit.copy() 
 
-experiment_folder_name = "Optimum_MPC_Experiment_diff_blah"
+experiment_folder_name = "firstpart_opt_experiment"
 
 #WATCH OUT --> since mode_params was a dict what was happening is that the values of it kept getting changed
 

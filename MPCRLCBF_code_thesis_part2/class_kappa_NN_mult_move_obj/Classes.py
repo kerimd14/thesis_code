@@ -51,9 +51,7 @@ class Obstacles:
         #vx and vy are supposed represent the change in postion of obstacles, that is how i will show velocity
         h_list = []
         for (r, x_pred, y_pred )in zip(self.radii, xpred_list, ypred_list):
-            
             h_list.append((x[0] - x_pred)**2 + (x[1] - y_pred)**2 - r**2)
-            
         return h_list
 
     def make_h_functions(self):
@@ -312,7 +310,7 @@ class ObstacleMotion:
     
 class NN:
 
-    def __init__(self, layers_size, positions, radii, mode_params, modes):
+    def __init__(self, layers_size, positions, radii, mode_params):
         """
         layers_size = list of layer sizes, including input and output sizes, for example: [5, 7, 7, 1]
         hidden_layers = number of hidden layers
@@ -323,38 +321,19 @@ class NN:
         self.layers_size = layers_size
         self.ns = NUM_STATES
         # list of weights and biases and activations
-        self.weights = []  
-        self.biases  = [] 
+        self.phis = []  #replcaing self.weights by the self.phis to ensure that these weights stay above zero  
+        self.biases  = [] # biases
         self.activations = []
         self.radii = radii
         self.positions = positions
-        self.modes       = modes
-        self.mode_params = mode_params
 
 
         self.build_network()
         self.np_random = np.random.default_rng(seed=SEED)
         
-        # self.bounds_x = np.array([mode_params[i]["bounds"] for i in range(self.obst.obstacle_num)])  # shape (m, 2)
-        # self.bounds_y = np.array([(py, py) for (_, py) in self.positions])
-        bx, by = [], []
-        for i in range(self.obst.obstacle_num):
-            px, py = self.positions[i]
-            mode   = self.modes[i]
-            mp     = self.mode_params[i]
+        self.bounds_x = np.array([mode_params[i]["bounds"] for i in range(self.obst.obstacle_num)])  # shape (m, 2)
+        self.bounds_y = np.array([(py, py) for (_, py) in self.positions])
 
-            if mode == "static":
-                bx.append((px, px))
-                by.append((py, py))
-
-            elif mode == "step_bounce":
-                xmin, xmax = mp["bounds"]
-                bx.append((xmin, xmax))
-                by.append((py, py))
-                
-        self.bounds_x = np.array(bx)  # shape (m, 2)
-        self.bounds_y = np.array(by)  # shape (m, 2)
-                
     def relu(self, x):
         """Standard ReLU: max(x, 0)."""
         return cs.fmax(x, 0)
@@ -391,18 +370,13 @@ class NN:
         pos_x    = nn_input[self.ns+self.obst.obstacle_num:self.ns+2*self.obst.obstacle_num]
         pos_y    = nn_input[self.ns+2*self.obst.obstacle_num:self.ns+3*self.obst.obstacle_num]
         
-        def scale_centered(z, zmin, zmax, eps=1e-12):
-            return 2 * (z - zmin) / (zmax - zmin + eps) - 1
-  
-        
         Xmax, Ymax = CONSTRAINTS_X[0], CONSTRAINTS_X[1]
         Vxmax, Vymax = CONSTRAINTS_X[2], CONSTRAINTS_X[3]  
         
         x_min = cs.DM([-Xmax, -Ymax, -Vxmax, -Vymax])
         x_max = cs.DM([   0.,    0.,  Vxmax,  Vymax ])
         
-        # x_norm = (x_raw-x_min)/(x_max-x_min + 1e-9) # normalize the states based on the maximum values # normalize the states based on the maximum values
-        x_norm = scale_centered(x_raw, x_min, x_max)
+        x_norm = (x_raw-x_min)/(x_max-x_min + 1e-9) # normalize the states based on the maximum values # normalize the states based on the maximum values
         
         corners = [
         (-Xmax, -Ymax), (-Xmax, 0.0),
@@ -426,91 +400,40 @@ class NN:
 
         for i, h_i in enumerate(h_raw_split):
             h_max_i = h_max_list[i]
-            h_norm_i = scale_centered(h_i, 0.0, h_max_i)
-            # h_norm_i = h_i / h_max_i
-            # h_norm_i = cs.fmin(cs.fmax(h_norm_i, 0), 1)
+            h_norm_i = h_i / h_max_i
+            h_norm_i = cs.fmin(cs.fmax(h_norm_i, 0), 1)
             h_norm_list.append(h_norm_i)
             
         h_norm = cs.vertcat(*h_norm_list)
         
-        # #position of object normalization
-        # # bounds[i] == (xmin_i, xmax_i)
-        # bounds_DM_x = cs.DM(self.bounds_x)  # shape (m,2)
-        # pos_x_norm = [
-        #     (pos_x[i] - bounds_DM_x[i,0]) / (bounds_DM_x[i,1] - bounds_DM_x[i,0])
-        #     for i in range(self.obst.obstacle_num)
-        # ]
-        # pos_y_norm = [cs.DM(0.5) for _ in range(self.obst.obstacle_num)] #since it doesnt move we normalize to always be 0.5
+        #position of object normalization
+        # bounds[i] == (xmin_i, xmax_i)
+        bounds_DM_x = cs.DM(self.bounds_x)  # shape (m,2)
+        pos_x_norm = [
+            (pos_x[i] - bounds_DM_x[i,0]) / (bounds_DM_x[i,1] - bounds_DM_x[i,0])
+            for i in range(self.obst.obstacle_num)
+        ]
+        pos_y_norm = [cs.DM(0.5) for _ in range(self.obst.obstacle_num)] #since it doesnt move we normalize to always be 0.5
         
-        # pos_norm = cs.vertcat(*pos_x_norm, *pos_y_norm)
-        
-        eps = 1e-12
-        bx = cs.DM(self.bounds_x)  # (m,2)
-        by = cs.DM(self.bounds_y)  # (m,2)
-
-        pos_x_norm = []
-        pos_y_norm = []
-
-        for i in range(self.obst.obstacle_num):
-            mode_i = self.modes[i]
-
-            if mode_i == "static":
-                # stays put → constant mid-range
-                # nx = cs.DM(0.5)
-                # ny = cs.DM(0.5)
-                nx = cs.DM(0)
-                ny = cs.DM(0)
-
-            elif mode_i == "step_bounce":
-                # moves along one axis (you said: x moves, y fixed)
-                # nx = (pos_x[i] - bx[i,0]) / (bx[i,1] - bx[i,0] + eps)
-                # ny = cs.DM(0.5)
-                nx = scale_centered(pos_x[i], bx[i,0], bx[i,1])
-                ny = cs.DM(0)
-
-            # else:
-            #     # default: normalize both using the precomputed bounds (orbit/sinusoid/random etc.)
-            #     nx = (pos_x[i] - bx[i,0]) / (bx[i,1] - bx[i,0] + eps)
-            #     ny = (pos_y[i] - by[i,0]) / (by[i,1] - by[i,0] + eps)
-
-            # # clip to [0,1] to be safe
-            # nx = cs.fmin(cs.fmax(nx, 0), 1)
-            # ny = cs.fmin(cs.fmax(ny, 0), 1)
-
-            pos_x_norm.append(nx)
-            pos_y_norm.append(ny)
-
         pos_norm = cs.vertcat(*pos_x_norm, *pos_y_norm)
         
         return cs.vertcat(x_norm, h_norm, pos_norm)
-    
-    def _scale_to_spectral_radius(self, W: np.ndarray, target: float = 1.0, eps: float = 1e-12,
-                              power_iters: int | None = None) -> np.ndarray:
-        """
-        Uniform -> rescale so max biggest absolute eigenvalue = target.
-        """
 
-        eigvals = np.linalg.eigvals(W)
-        rho = np.max(np.abs(eigvals)).real
-
-        if rho > 0.0:
-            W = (float(target) / (rho + eps)) * W
-        return W
     
     def build_network(self):
         """
         build the stuff needed for network
         """
         for i in range(len(self.layers_size) - 1):
-            W = cs.MX.sym(f"W{i}", self.layers_size[i+1], self.layers_size[i])
+            phi_i = cs.MX.sym(f"phi{i}", self.layers_size[i+1], self.layers_size[i])
             b = cs.MX.sym(f"b{i}", self.layers_size[i+1], 1)
-            self.weights.append(W)
+            self.phis.append(phi_i)
             self.biases.append(b)
 
-            if i == len(self.layers_size) - 2:
-                self.activations.append(self.shifted_sigmoid)
-            else:
-                self.activations.append(self.leaky_relu)
+            self.activations.append(self.leaky_relu)
+        #basically we create weights and then to ensure they are positive we put them into an exponential 
+        #this way we keep the     
+        self.weights = [cs.exp(phi) for phi in self.phis]
 
     def forward(self, input_nn):
         """
@@ -537,9 +460,10 @@ class NN:
         return cs.Function('NN', inputs, [y])
     
     def get_flat_parameters(self):
-        weight_list = [cs.reshape(W, -1, 1) for W in self.weights]
+        # weight_list = [cs.reshape(W, -1, 1) for W in self.weights]
+        phi_list  = [cs.reshape(phi, -1, 1) for phi in self.phis]
         bias_list = [cs.reshape(b, -1, 1) for b in self.biases]
-        return cs.vertcat(*(weight_list + bias_list))
+        return cs.vertcat(*(phi_list+ bias_list))
     
     def get_alpha_nn(self):
         nn_fn = self.create_forward_function()
@@ -573,41 +497,26 @@ class NN:
         """
         initialization for the neural network (he normal for relu)
         """
-        weight_values = []
+        Phi_values = []
         bias_values = []
-        
-        
-        neg_slope = 0.01
-        gain_leaky = np.sqrt(2.0 / (1.0 + neg_slope**2))  # around 1.414
-        target_rho = getattr(self, "spectral_radius", 0.95)
-        
-        
         for i in range(len(self.layers_size) - 1):
             fan_in = self.layers_size[i] #5 input dim # 7 input dim #7 input dim
             fan_out = self.layers_size[i + 1] #7 output dim # 7 output dim # 1 output dim
-
-            if i < len(self.layers_size) - 2:
                 
-                bound = np.sqrt(6.0 / fan_in) / gain_leaky
+            bound_low = np.sqrt(6.0 / fan_in)
+            bound_high = np.sqrt(6.0 / fan_out)
+            phi_val = 0.1*self.np_random.uniform(low=-bound_low, high=bound_high, size=(fan_out, fan_in))
                 
-                # bound_low = np.sqrt(6.0 / fan_in)
-                # bound_high = np.sqrt(6.0 / fan_out)
-                W_val = self.np_random.uniform(low=-bound, high=bound, size=(fan_out, fan_in))
-                
-            else:
-                
-                bound = 0.1*np.sqrt(6.0 / (fan_in + fan_out))
-                W_val = self.np_random.uniform(low=-bound, high=bound, size=(fan_out, fan_in))
             
             # biases = zero
             b_val = np.zeros((fan_out, 1))
 
-            weight_values.append(W_val.reshape(-1))
+            Phi_values.append(phi_val.reshape(-1))
             bias_values.append(b_val.reshape(-1))
 
-        flat_params = np.concatenate(weight_values + bias_values, axis=0)
+        flat_params = np.concatenate(Phi_values + bias_values, axis=0)
         flat_params = cs.DM(flat_params)
-        return flat_params, weight_values, bias_values
+        return flat_params, Phi_values, bias_values
 
 
 
@@ -662,7 +571,7 @@ class MPC:
     ns = NUM_STATES # num of states
     na = NUM_INPUTS # num of inputs
 
-    def __init__(self, layers_list, horizon, positions, radii, slack_penalty, mode_params, modes):
+    def __init__(self, layers_list, horizon, positions, radii, slack_penalty, mode_params):
         """
         Initialize the MPC class with parameters.
         
@@ -713,7 +622,7 @@ class MPC:
         self.V_sym = cs.MX.sym("V0")
         
         # instantiate the Neural Network
-        self.nn = NN(layers_list, positions, radii, copy.deepcopy(mode_params), modes=modes)
+        self.nn = NN(layers_list, positions, radii, copy.deepcopy(mode_params))
         self.m = self.nn.obst.obstacle_num  # number of obstacles
         self.xpred_list = cs.MX.sym("xpred_list", self.m)  # velocity in x direction
         self.ypred_list = cs.MX.sym("ypred_list", self.m) # velocity in y direction
@@ -1194,9 +1103,7 @@ class RLclass:
             radii, 
             modes, 
             mode_params,
-            slack_penalty_MPC,
-            slack_penalty_RL,
-            ):
+            slack_penalty):
             
             # Store random seed for reproducibility
             self.seed = seed
@@ -1205,11 +1112,10 @@ class RLclass:
             self.env = env()
             
             # Penalty in RL stagecost on slacks
-            self.slack_penalty_MPC = slack_penalty_MPC
-            self.slack_penalty_RL = slack_penalty_RL
+            self.slack_penalty = slack_penalty
 
             # Initialize MPC and obstacle‐motion classes 
-            self.mpc = MPC(layers_list, horizon, positions, radii, self.slack_penalty_MPC, mode_params, modes)
+            self.mpc = MPC(layers_list, horizon, positions, radii, slack_penalty, mode_params)
             self.obst_motion = ObstacleMotion(positions, modes, mode_params)
             
             # Parameters of experiments and states
@@ -1344,8 +1250,8 @@ class RLclass:
 
             # fixed zoom
             span = constraints_x
-            ax.set_xlim(-1.1*span, +0.5*span)
-            ax.set_ylim(-1.1*span, +0.5*span)
+            ax.set_xlim(-1.1*span, +0.1*span)
+            ax.set_ylim(-1.1*span, +0.1*span)
 
             # system artists
             line, = ax.plot([], [], "o-", lw=2, label="system path")
@@ -1476,7 +1382,7 @@ class RLclass:
 
             return params
 
-        def noise_scale_by_distance(self, x, y, max_radius=0.5):
+        def noise_scale_by_distance(self, x, y, max_radius=3):
             """
             Compute a scaling factor for exploration noise based on distance from the origin. 
             Close to the origin, noise is scaled down; at max_radius, it is 1.
@@ -1535,22 +1441,6 @@ class RLclass:
                     tau = max(1.05 * tau, beta)
             print("Warning: Cholesky decomposition failed after maximum iterations; returning zero matrix.")
             return np.zeros((A.shape[0], A.shape[0]))
-        
-        def check_whh_spectral_radii(self, params_nn_list):
-            """
-            Check and print the spectral radii of the recurrent weight matrices in the NN.
-
-            Args:
-                params_nn_list (_type_): _description_
-            """
-            
-            self.layers_list
-            
-            for i in range(len(self.layers_list)-1):
-                Whh = params_nn_list[3*i + 2]  # recurrent weights
-                eigvals = np.linalg.eigvals(Whh)
-                rho = np.max(np.abs(eigvals)).real 
-                print(f"Hidden layer {i+1} recurrent weight matrix spectral radius: {rho:.4f}")
 
         def V_MPC(self, params, x, xpred_list, ypred_list):
             """
@@ -1817,7 +1707,7 @@ class RLclass:
             
             return (
                 state.T @ Qstage @ state
-                + action.T @ Rstage @ action +self.slack_penalty_RL*(np.sum(S)/(self.horizon+self.mpc.nn.obst.obstacle_num)) + np.sum(2e5*violations)
+                + action.T @ Rstage @ action + np.sum(self.slack_penalty *S) + np.sum(5e5*violations)
             )
         
         def evaluation_step(self, params, experiment_folder, episode_duration):
@@ -2047,7 +1937,7 @@ class RLclass:
             # constrained update qp update
             solution = self.qp_solver(
                     p=cs.vertcat(theta_vector_num, dtheta),
-                    lbg = cs.vertcat(np.zeros(4), -np.inf*np.ones(theta_vector_num.shape[0]-4)),
+                    lbg=cs.vertcat(np.zeros(4), -np.inf*np.ones(theta_vector_num.shape[0]-4)),
                     ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
                     # lbg= cs.vertcat(-np.inf*np.ones(theta_vector_num.shape[0])),
                     # ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
@@ -2204,7 +2094,7 @@ class RLclass:
                 )['qlagrange_sens']
                 
                 
-                # outer_product = qlagrange_numeric_jacob @ qlagrange_numeric_jacob.T
+                outer_product = qlagrange_numeric_jacob @ qlagrange_numeric_jacob.T
                 # first order update
                 B_update = -TD*qlagrange_numeric_jacob
                 grad_temp.append(qlagrange_numeric_jacob)
@@ -2230,13 +2120,13 @@ class RLclass:
                         
                         # self.evaluation_step(S=S, params=params, experiment_folder=experiment_folder, episode_duration=episode_duration)
                         print (f"updatedddddd")
-                        B_update_avg = np.mean(B_update_buffer, 0)
-                        # buf = np.asarray(B_update_buffer)            # [N, d]
-                        # batch = int(0.3*len(buf))          # pick number you want 
+                        
+                        buf = np.asarray(B_update_buffer)            # [N, d]
+                        batch = int(0.3*len(buf))          # pick number you want 
 
-                        # # Uniform replay (simple & stable):
-                        # idx = self.np_random.choice(len(buf), size=batch, replace=False)
-                        # B_update_avg = buf[idx].mean(axis=0)
+                        # Uniform replay (simple & stable):
+                        idx = self.np_random.choice(len(buf), size=batch, replace=False)
+                        B_update_avg = buf[idx].mean(axis=0)
                         
                         B_update_history.append(B_update_avg)
 
@@ -2431,7 +2321,7 @@ class RLclass:
                              for hf in self.h_funcs ]
             
                     hx_list = [hx]
-                    #for NN outputs
+                    #for RNN outputs
                     alphas = []
                     
                     self.x_prev_VMPC        = cs.DM()  

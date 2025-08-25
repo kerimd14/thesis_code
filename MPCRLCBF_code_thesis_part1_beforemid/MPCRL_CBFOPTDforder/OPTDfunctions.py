@@ -32,7 +32,7 @@ def stage_cost_func(action, x):
             )
                 
 
-def MPC_func(x, mpc, params):
+def MPC_func(x, mpc, params, x_prev, lam_x_prev, lam_g_prev):
 
         solver_inst = mpc.MPC_solver() 
         
@@ -73,6 +73,9 @@ def MPC_func(x, mpc, params):
         R_flat = cs.reshape(R , -1, 1)
 
         solution = solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], V, P_diag, Q_flat, R_flat, Pw, omega0),
+            x0    = x_prev,
+            lam_x0 = lam_x_prev,
+            lam_g0 = lam_g_prev,
             ubx=ubx,  
             lbx=lbx,
             ubg =ubg,
@@ -86,8 +89,12 @@ def MPC_func(x, mpc, params):
         # print(f"omega parameter: {solution['x'][-1]}")
         # print(f"the whole solution: {solution['x']}")
         omega = solution['x'][-1]
+        
+        x_prev = solution["x"]
+        lam_x_prev = solution["lam_x"]
+        lam_g_prev= solution["lam_g"]
 
-        return u_opt, solution["f"], omega, g_resid
+        return u_opt, solution["f"], omega, g_resid, x_prev, lam_x_prev, lam_g_prev
 
 # def save_figure(fig, filename, experiment_folder):
      
@@ -139,9 +146,12 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     omegas = []
     hx = [mpc.h_func(cs.DM(state))]
     g_resid_lst = []    
+    
+    x_prev, lam_x_prev, lam_g_prev = cs.DM(), cs.DM(), cs.DM()
 
     for i in range(episode_duration):
-        action, _, omega, g_resid = MPC_func(state, mpc, params)
+        action, _, omega, g_resid, x_prev, lam_x_prev, lam_g_prev  = MPC_func(state, mpc, params,
+                                            x_prev, lam_x_prev, lam_g_prev)
 
         action = cs.fmin(cs.fmax(cs.DM(action), -u_global), u_global)
         state, _, done, _, _ = env.step(action)
@@ -329,29 +339,29 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     
     if after_updates == False:
         figs = [
-                    (figstates, "states_MPCregular_beforeupdates"),
-                    (figactions, "actions_MPCregular_beforeupdates"),
-                    (figstagecost, "stagecost_MPCregular_beforeupdates"),
-                    (figsomega, "omega_MPCregular_beforeupdates"),
-                    (figsvelocity, "velocity_MPCregular_beforeupdates"),
-                    (figshx, "hx_MPCregular_beforeupdates"),
-                    (figshxmarg, "marghx_MPCregular_beforeupdates")
+                    (figstates, "states_MPCregular_beforeupdates.svg"),
+                    (figactions, "actions_MPCregular_beforeupdates.svg"),
+                    (figstagecost, "stagecost_MPCregular_beforeupdates.svg"),
+                    (figsomega, "omega_MPCregular_beforeupdates.svg"),
+                    (figsvelocity, "velocity_MPCregular_beforeupdates.svg"),
+                    (figshx, "hx_MPCregular_beforeupdates.svg"),
+                    (figshxmarg, "marghx_MPCregular_beforeupdates.svg")
                 ]
     else:
          figs = [
-                    (figstates, "states_MPCregular_afterupdates"),
-                    (figactions, "actions_MPCregular_afterupdates"),
-                    (figstagecost, "stagecost_MPCregular_afterupdates"),
-                    (figsomega, "omega_MPCregular_afterupdates"),
-                    (figsvelocity, "velocity_MPCregular_afterupdates"),
-                    (figshx, "hx_MPCregular_afterupdates"),
-                    (figshxmarg, "marghx_MPCregular_afterupdates")
+                    (figstates, "states_MPCregular_afterupdates.svg"),
+                    (figactions, "actions_MPCregular_afterupdates.svg"),
+                    (figstagecost, "stagecost_MPCregular_afterupdates.svg"),
+                    (figsomega, "omega_MPCregular_afterupdates.svg"),
+                    (figsvelocity, "velocity_MPCregular_afterupdates.svg"),
+                    (figshx, "hx_MPCregular_afterupdates.svg"),
+                    (figshxmarg, "marghx_MPCregular_afterupdates.svg")
                 ]
 
-    figs.append((fig8, f"states_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
-    figs.append((fig9, f"omega_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
-    figs.append((fig10, f"hx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
-    figs.append((fig11, f"marghx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
+    figs.append((fig8, f"states_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
+    figs.append((fig9, f"omega_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
+    figs.append((fig10, f"hx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
+    figs.append((fig11, f"marghx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
 
     save_figures(figs,  experiment_folder)
     plt.close('all')
@@ -362,7 +372,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
 
     return sum(stage_cost)
 
-def MPC_func_random(x, mpc, params, solver_inst, rand_noise):
+def MPC_func_random(x, mpc, params, solver_inst, rand_noise, x_prev, lam_x_prev, lam_g_prev):
         dt = 0.2
         
         # bounds
@@ -403,6 +413,9 @@ def MPC_func_random(x, mpc, params, solver_inst, rand_noise):
 
 
         solution = solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], V, P_diag, Q_flat, R_flat, Pw, omega0, rand_noise),
+            x0    = x_prev,
+            lam_x0 = lam_x_prev,
+            lam_g0 = lam_g_prev,
             ubx=ubx,  
             lbx=lbx,
             ubg =ubg,
@@ -412,8 +425,12 @@ def MPC_func_random(x, mpc, params, solver_inst, rand_noise):
 
         u_opt = solution["x"][mpc.ns * (mpc.horizon+1):mpc.ns * (mpc.horizon+1) + mpc.na]
         print(solution["x"][-1])
+        
+        x_prev = solution["x"]
+        lam_x_prev = solution["lam_x"]
+        lam_g_prev= solution["lam_g"]
 
-        return u_opt, solution["f"]
+        return u_opt, solution["f"], x_prev, lam_x_prev, lam_g_prev
 
 def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, noise_scalingfactor, noise_variance):
 
@@ -428,6 +445,8 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     mpc = MPC(0.2)
 
     solver_inst = mpc.MPC_solver_rand() 
+    
+    x_prev, lam_x_prev, lam_g_prev = cs.DM(), cs.DM(), cs.DM()  # initialize warm start variables
 
     for i in range(episode_duration):
         #rand_noise = noise_scalingfactor*np_random.normal(loc=0, scale=noise_variance, size = (2,1))
@@ -439,7 +458,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
 
         rand_noise = noise_scalingfactor*np_random.normal(loc=0, scale=noise_variance, size = (2,1)) #*noise_scale_by_distance(state[0], state[1])
 
-        action, _ = MPC_func_random(state, mpc, params, solver_inst, rand_noise=rand_noise)
+        action, _, x_prev, lam_x_prev, lam_g_prev = MPC_func_random(state, mpc, params, solver_inst, rand_noise=rand_noise, x_prev=x_prev, lam_x_prev=lam_x_prev, lam_g_prev=lam_g_prev)
         
 
         # if i<(0.65*2000):
@@ -481,7 +500,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     # Set labels and title
     plt.xlabel("$x$")
     plt.ylabel("$y$")
-    plt.title("Trajectories for different combinations of $P_w$ and $\omega_0$")
+    plt.title(r"Trajectories for different combinations of $P_w$ and $\bar{\omega}$")
     plt.legend()
     plt.axis("equal")
     plt.grid()
@@ -519,10 +538,10 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     ##plt.show()
 
     figs = [
-                (figstates, "states_MPCnoise"),
-                (figactions, "actions_MPCnoise"),
-                (figstagecost, "stagecost_MPCrandom"),
-                (figsvelocity, "velocity_MPCrandom")
+                (figstates, "states_MPCnoise.svg"),
+                (figactions, "actions_MPCnoise.svg"),
+                (figstagecost, "stagecost_MPCrandom.svg"),
+                (figsvelocity, "velocity_MPCrandom.svg")
             ]
 
     save_figures(figs,  experiment_folder)

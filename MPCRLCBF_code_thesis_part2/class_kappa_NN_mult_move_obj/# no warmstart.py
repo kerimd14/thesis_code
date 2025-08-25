@@ -1,8 +1,9 @@
-
-
+# no warmstart
+        
 import gymnasium as gym 
 import numpy as np
 import os # to communicate with the operating system
+import copy
 from gymnasium.spaces import Box
 import casadi as cs
 import matplotlib.pyplot as plt
@@ -10,14 +11,224 @@ from control import dlqr
 from collections import deque
 import pandas as pd
 
+from config import SAMPLING_TIME, NUM_INPUTS, NUM_STATES, CONSTRAINTS_X, SEED, CONSTRAINTS_U
 
+
+
+class Obstacles:
+
+    def __init__(self, positions, radii):
+
+        """
+        positions: list of positions of the obstacles
+        radius: list of radius of the obstacles
+        """
+        self.positions = positions
+        self.radii = radii
+        self.obstacle_num = len(positions)
+        self.dt = SAMPLING_TIME
+
+    def h_obsfunc(self, x, xpred_list, ypred_list):
+        """
+        resturns list of CBF funcs ( h(x) ) but in a numerical format
+        """
+        #vx and vy are supposed represent the change in postion of obstacles, that is how i will show velocity
+        h_list = []
+        for (r, x_pred, y_pred )in zip(self.radii, xpred_list, ypred_list):
+            h_list.append((x[0] - x_pred)**2 + (x[1] - y_pred)**2 - r**2)
+        return h_list
+
+    def make_h_functions(self):
+        """
+        resturns list of CBF funcs ( h(x) ) but for in a function format
+        """
+        funcs = []
+        x = cs.MX.sym("x", 4)
+        
+        #vx and vy are supposed represent the change in postion of obstacles, that is how i will show velocity
+        
+        xpred_list = cs.MX.sym("vx", self.obstacle_num)  # velocity in x direction
+        ypred_list= cs.MX.sym("vy", self.obstacle_num) # velocity in y direction
+
+        for  idx, (r) in enumerate(self.radii):
+            # build the i-th obstacle expression
+            xpred_i    = xpred_list[idx]
+            ypred_i    = ypred_list[idx]
+            
+            hi_expr = (x[0] - xpred_i)**2 + (x[1] - ypred_i)**2 - r**2
+
+            hi_fun = cs.Function(f"h{idx+1}", [x, xpred_list, ypred_list], [hi_expr])
+            funcs.append(hi_fun)
+
+        return funcs
+    
+    
+
+class ObstacleMotion:
+    def __init__(self,
+                 positions: list,
+                 modes: list[str],
+                 mode_params: list[dict]):
+        """
+        positions    : list of obstacle centers (for bookkeeping)
+        modes        : list of length m, each in {"static","random","sinusoid","step_bounce","orbit"}
+        mode_params  : list of length m, each a dict with keys needed by that mode:
+                       - for "step_bounce": {"bounds":(xmin,xmax),"speed":v, "dir":±1}
+                       - for "orbit":       {"omega":angular_speed, "center":(cx0,cy0)}
+                       - for "sinusoid":    {"amp":A,"freq":f,"phase":ϕ}
+                       - for "random":      {"sigma":σ}
+        """
+        assert len(positions) == len(modes) == len(mode_params)
+        self.m           = len(positions)
+        self.modes       = modes
+        self.mode_params = mode_params
+
+        # state for velocity models
+        self.vx = np.zeros(self.m)
+        self.vy = np.zeros(self.m)
+        self.dt = SAMPLING_TIME
+        self.t  = 0.0
+        
+        self.cx = np.array([p[0] for p in positions], dtype=float)
+        self.cy = np.array([p[1] for p in positions], dtype=float)
+        
+        self._dispatch = {
+                "static"  : self._step_static,
+                "random"  : self._step_random_walk,
+                "sinusoid": self._step_sinusoid,
+                "step_bounce": self._step_bounce,
+                "orbit"      : self._step_orbit,
+            }
+        
+        self._init_state = {
+            "cx": self.cx.copy(),
+            "cy": self.cy.copy(),
+            "vx": self.vx.copy(),
+            "vy": self.vy.copy(),
+            "t":  self.t,
+            "mode_params": copy.deepcopy(self.mode_params),
+        }
+
+
+    def step(self):
+        """Advance one dt, update & return (vx, vy) arrays of shape (m,)."""
+        for i, mode in enumerate(self.modes):
+            vx_i, vy_i = self._dispatch[mode](i)
+            self.vx[i], self.vy[i] = vx_i, vy_i
+
+        self.cx += - self.vx * self.dt
+        self.cy += - self.vy * self.dt
+
+        self.t += self.dt
+        return self.cx.copy(), self.cy.copy()
+
+    def _step_static(self, i: int):
+        """Obstacle i stays still."""
+        return 0.0, 0.0
+
+    def _step_random_walk(self, i: int):
+        """Gaussian random‐walk for obstacle i."""
+        sigma = self.mode_params[i].get("sigma", 0.1)
+        vx_new = self.vx[i] + np.random.randn() * sigma
+        vy_new = self.vy[i] + np.random.randn() * sigma
+        return vx_new, vy_new
+
+    def _step_sinusoid(self, i: int):
+        """Sinusoidal motion for obstacle i."""
+        mp   = self.mode_params[i]
+        amp  = mp.get("amp", 1.0)
+        freq = mp.get("freq", 0.5)
+        phase= mp.get("phase", 0.0)
+        phi    = 2 * np.pi * freq * self.t + phase
+        vx_i = amp * np.sin(phi)
+        vy_i = amp * np.cos(phi)
+        return vx_i, vy_i 
+    
+    def _step_bounce(self, i):
+        mp     = self.mode_params[i]
+        xmin, xmax = mp["bounds"]         
+        speed = mp["speed"]                
+        # read+update your current direction in-place:
+        dir   = mp.get("dir", -1)          
+        next_x = self.cx[i] - dir*speed*self.dt
+        if next_x < xmin or next_x > xmax:
+            dir *= -1
+        mp["dir"] = dir                    # save flipped direction
+        return dir*speed, 0.0
+    
+    def _step_orbit(self, i):
+        """
+        Rotate around a center point at angular rate omega.
+        Velocity v = ω × r, where r is the distance to the center.
+        """
+        mp     = self.mode_params[i]
+        omega  = mp.get("omega", 1.0)            # rad/s
+        cx0, cy0 = mp.get("center", (0.0, 0.0))  # pivot
+        dx = self.cx[i] - cx0
+        dy = self.cy[i] - cy0
+        vx_i = -omega * dy
+        vy_i =  omega * dx
+        return vx_i, vy_i
+    
+    def current_positions(self):
+        return list(zip(self.cx, self.cy))
+    
+    def predict_states(self, N: int):
+        """
+        Return (N, m) arrays of vx and vy, by simulating N steps ahead
+        and then rolling everything back.
+        """
+        prediction = {
+            "cx": self.cx.copy(),
+            "cy": self.cy.copy(),
+            "vx": self.vx.copy(),
+            "vy": self.vy.copy(),
+            "t":  self.t,
+            "mode_params": copy.deepcopy(self.mode_params),
+        }
+
+        # simulate N steps
+        x_pred = np.zeros((N, self.m))
+        y_pred = np.zeros((N, self.m))
+        for k in range(N):
+            x_k, y_k = self.step()
+            x_pred[k, :] = x_k
+            y_pred[k, :] = y_k
+                            
+        # restore from backup
+        self.cx          = prediction["cx"]
+        self.cy          = prediction["cy"]
+        self.vx          = prediction["vx"]
+        self.vy          = prediction["vy"]
+        self.t           = prediction["t"]
+        self.mode_params = prediction["mode_params"]
+
+        return x_pred.flatten(), y_pred.flatten()
+    
+    def reset(self):
+        """
+        Restore intial state of the obstacles.
+        """
+        st = self._init_state
+        self.cx          = st["cx"].copy()
+        self.cy          = st["cy"].copy()
+        self.vx          = st["vx"].copy()
+        self.vy          = st["vy"].copy()
+        self.t           = st["t"]
+        self.mode_params = copy.deepcopy(st["mode_params"])
+        return self.current_positions()
+    
+    
 class NN:
 
-    def __init__(self, layers_size):
+    def __init__(self, layers_size, positions, radii):
         """
         layers_size = list of layer sizes, including input and output sizes, for example: [5, 7, 7, 1]
         hidden_layers = number of hidden layers
         """
+        
+        self.obst = Obstacles(positions, radii)
+        
         self.layers_size = layers_size
 
         # list of weights and biases and activations
@@ -27,7 +238,7 @@ class NN:
 
 
         self.build_network()
-        self.np_random = np.random.default_rng(seed=69)
+        self.np_random = np.random.default_rng(seed=SEED)
 
     def relu(self, x):
         #relu activation, used for all layers except the output layer
@@ -49,51 +260,23 @@ class NN:
         return epsilon + (1 - epsilon) * (1 / (1 + cs.exp(-x)))
     
     def normalization_z(self, nn_input):
+        
         """
         Normalizes based on opt trajct
-        Mean states: [-0.0305078  -0.02024065  0.00833056  0.00833056]
-        Std states: [0.33782308 0.27604534 0.09290382 0.10660607]
-        Mean h: 6.7885445905109325
-        Std h: 0.4382974988082045   
-
-        i got this from running one of the experiments for a while 
-        mu_states = cs.DM([ -2.5, -2.3944139357936685,  -2.3725275577367517,  -2.354785316341667])
-        sigma_states = cs.DM([ 2.5, 2.5864285967567553,  2.5695953629868264,  2.548245014835132])
-        mu_h = 7.029327953272546 
-        sigma_h = 2.3904895754547553
-
-        simulating opt trajct and then cutting off
-
-        mu_states = cs.DM([ -1.57845433, -1.04727382, 0.43096913,  0.43102892])
-        sigma_states = cs.DM([ 1.8605361,  1.69326945,  0.51423965, 0.63705421])
-
-        # mu_h =  4.692387613414234
-        # sigma_h = 2.7606664837421535
-
 
         """
+        
         mu_states = cs.DM([-0.97504422, -0.64636289, 0.05090653, 0.05091322])
         sigma_states = cs.DM([1.39463336, 1.18101312, 0.0922252, 0.09315792])
 
-        mu_h = 26.0464150055885
-        sigma_h = 11.6279296875
+        mu_h = 26.0464150055885 #* np.ones(self.obst.h_obsfunc(nn_input[:4]).shape[0]) # 26.0464150055885
+        sigma_h = 11.6279296875#* np.ones(self.obst.h_obsfunc(nn_input[:4]).shape[0])
         
 
         x_norm = (nn_input[:4] - mu_states) / sigma_states
         
-        h_norm = (nn_input[-1] - mu_h) / (sigma_h)
-
-
-        # average mean of x_1: -2.5
-        # average mean of x_2: -2.3944139357936685
-        # average mean of x_3: -2.3725275577367517
-        # average mean of x_4: -2.354785316341667
-        # average mean of hx: 7.029327953272546
-        # average std of x_1: 2.5
-        # average std of x_2: 2.5864285967567553
-        # average std of x_3: 2.5695953629868264
-        # average std of x_4: 2.548245014835132
-        # average std of hx: 2.3904895754547553
+        #
+        h_norm = nn_input[4:]#(nn_input[4:] - mu_h) / (sigma_h)
 
         return cs.vertcat(x_norm, h_norm)
 
@@ -156,28 +339,16 @@ class NN:
         #     z = self.weights[i] @ a + self.biases[i]
         #     a = self.activations[i](z)
         # return a
-        x = cs.MX.sym('x', self.layers_size[0]-1, 1)
-
-        h_min = 0#-2.25
-        h_max = 11.8125
-
-        mu_h = (h_min + h_max) / 2.0
-        sigma_h = (h_max - h_min) / np.sqrt(12)
-
-        print(f"mu_h: {mu_h + sigma_h*mu_h}")
-        print(f"simgma_h: {sigma_h**2}")
-
-        pos = cs.DM([-2, -2.25])
-        r = cs.DM(1.5)
-        h = (x[0] - pos[0])**2 + (x[1] - pos[1])**2 - r**2
-
-        input = cs.vertcat(x, h)
+        x = cs.MX.sym('x', NUM_STATES, 1)
+        h_func_list = cs.MX.sym('h_func', self.obst.obstacle_num, 1)
+      
+        input = cs.vertcat(x, h_func_list)
 
         y = self.forward(input)
 
        
 
-        return cs.Function('NN', [x, self.get_flat_parameters()],[y])
+        return cs.Function('NN', [x, h_func_list, self.get_flat_parameters()],[y])
     
 
     def initialize_parameters(self):
@@ -191,21 +362,13 @@ class NN:
             fan_out = self.layers_size[i + 1] #7 output dim # 7 output dim # 1 output dim
 
             if i < len(self.layers_size) - 2:
-                # W_val = self.np_random.normal(
-                #     loc=0.0, 
-                #     scale=np.sqrt(2.0 / fan_in),
-                #     size=(fan_out, fan_in)
-                # )
-                # bound = sqrt(3) * sqrt(2/fan_in) = sqrt(6/fan_in)
+                
                 bound_low = np.sqrt(6.0 / fan_in)
                 bound_high = np.sqrt(6.0 / fan_out)
                 W_val = self.np_random.uniform(low=-bound_low, high=bound_high, size=(fan_out, fan_in))
+                
             else:
-                # W_val = self.np_random.normal(
-                #     loc=0.0, 
-                #     scale=1,
-                #     size=(fan_out, fan_in)
-                # )
+                
                 bound = np.sqrt(6.0 / (fan_in + fan_out))
                 W_val = self.np_random.uniform(low=-bound, high=bound, size=(fan_out, fan_in))
             
@@ -224,16 +387,16 @@ class NN:
 
 class env(gym.Env):
 
-    def __init__(self, sampling_time:float):
+    def __init__(self):
         super().__init__()
-        self.na = 2
-        self.ns = 4
-        self.umax = 1
-        self.umin = -1
+        self.na = NUM_INPUTS
+        self.ns = NUM_STATES
+        self.umax = CONSTRAINTS_U
+        self.umin = -CONSTRAINTS_U
 
-        self.observation_space = Box(-5, 5, (self.ns,), np.float64)
+        self.observation_space = Box(-CONSTRAINTS_X, CONSTRAINTS_X, (self.ns,), np.float64)
         self.action_space = Box(self.umin, self.umax, (self.na,), np.float64)
-        self.dt = sampling_time
+        self.dt = SAMPLING_TIME
 
         self.A = np.array([
             [1, 0, self.dt, 0], 
@@ -245,13 +408,13 @@ class env(gym.Env):
 
     def reset(self, seed, options):
         super().reset(seed=seed, options=options)
-        self.x = np.asarray([-5, -5, 0, 0])
+        self.x = np.asarray([-CONSTRAINTS_X, -CONSTRAINTS_X, 0, 0])
         # assert self.observation_space.contains(self.x), f"invalid reset state {self.x}"
         return self.x, {}
 
     def step(
         self, action):
-        x = self.x
+        # x = self.x
         u = np.asarray(action).reshape(self.na)
         self.B = np.array([
             [0.5 * self.dt**2, 0], 
@@ -269,18 +432,18 @@ class env(gym.Env):
 
 class MPC:
     # constant of MPC class
-    ns = 4 # num of states
-    na = 2 # num of inputs
-    horizon = 1 # MPC horizon
+    ns = NUM_STATES # num of states
+    na = NUM_INPUTS # num of inputs
 
-    def __init__(self, dt, layers_list):
+    def __init__(self, layers_list, horizon, positions, radii):
         """
         Initialize the MPC class with parameters.
         """
         self.ns = MPC.ns
         self.na = MPC.na
-        self.horizon = MPC.horizon
+        self.horizon = horizon
         # self.x0 = cs.MX.sym("x0")
+        dt = SAMPLING_TIME
 
         self.A = np.array([
             [1, 0, dt, 0], 
@@ -312,6 +475,16 @@ class MPC:
         self.Q_sym = cs.MX.sym("Q", self.ns, self.ns)
         self.R_sym = cs.MX.sym("R", self.na, self.na)
         self.V_sym = cs.MX.sym("V0")
+        
+        # intilization of the Neural Network
+        self.nn = NN(layers_list, positions, radii)
+        self.m = self.nn.obst.obstacle_num  # number of obstacles
+        self.xpred_list = cs.MX.sym("xpred_list", self.m)  # velocity in x direction
+        self.ypred_list = cs.MX.sym("ypred_list", self.m) # velocity in y direction
+        self.xpred_hor = cs.MX.sym("xpred_hor", self.m * self.horizon)
+        self.ypred_hor = cs.MX.sym("ypred_hor", self.m * self.horizon)
+        
+        print(self.xpred_hor.shape)
 
         #weight on the slack variables
         # self.weight_cbf = cs.DM([1e8])
@@ -321,10 +494,10 @@ class MPC:
         # decision variables
         self.X_sym = cs.MX.sym("X", self.ns, self.horizon+1)
         self.U_sym = cs.MX.sym("U",self.na, self.horizon)
-        self.S_sym = cs.MX.sym("S", 1, self.horizon)
+        
+        # slack variable matrix with positions and horizon
+        self.S_sym = cs.MX.sym("S", self.m, self.horizon)
 
-        self.pos = cs.DM([-2, -2.25])
-        self.r = cs.DM(1.5)
         self.x_sym = cs.MX.sym("x", MPC.ns)
         self.u_sym = cs.MX.sym("u", MPC.na)
 
@@ -332,15 +505,6 @@ class MPC:
         # defining stuff for CBF
         x_new  = self.A @ self.x_sym + self.B @ self.u_sym 
         self.dynamics_f = cs.Function('f', [self.x_sym, self.u_sym], [x_new], ['x','u'], ['ode'])
-
-        h = (self.x_sym[0] - (self.pos[0]))**2 + (self.x_sym[1] - (self.pos[1]))**2 - self.r**2
-
-        self.h_func = cs.Function('h', [self.x_sym], [h], ['x'], ['cbf'])
-
-        
-        # intilization of the Neural Network
-        self.nn = NN(layers_list)
-        # self.nn_fn = self.nn.create_forward_function()
 
         self.alpha_nn = self.nn.get_alpha_nn()
 
@@ -407,7 +571,7 @@ class MPC:
         >>> print(cbf)
         """
         x_next = dynamics(x, u)
-        phi = h(x)
+        phi = h(x, self.xpred_list, self.ypred_list)  # initial phi is h(x)
         for alpha in alphas:
             phi_next = cs.substitute(phi, x, x_next)
             phi = phi_next - phi + alpha(phi)
@@ -427,47 +591,90 @@ class MPC:
             state_const_list.append( self.X_sym[:,k+1] - ( self.A_sym @ self.X_sym[:,k] + self.B_sym @ self.U_sym[:,k] + self.b_sym ) )
 
         self.state_const_list = cs.vertcat( *state_const_list )
+        
+        print(f"self.state_const_list shape: {self.state_const_list.shape}")
 
         return 
     
     
     def cbf_func(self):
+        """
+        Build a single casadi.Function “cbff” whose output is an m×1 vector,
+        where m = number of obstacles.  Internally, we loop over each scalar
+        h_i and call dcbf(...) on it, then vert‐cat all φ_i into one vector.
+        """
+        # 1) Grab the list of individual CasADi Functions [h1(x₂); …; hₘ(x₂)]:
+        h_funcs = self.nn.obst.make_h_functions()  # length‐m Python list of casadi.Function
 
-        cbf = self.dcbf(self.h_func, self.x_sym, self.u_sym, self.dynamics_f, [lambda y: self.alpha_nn(cs.vertcat(self.x_sym, self.h_func(self.x_sym)))*y])
+        # 2) For each obstacle‐function h_i, compute φ_i(x,u) via dcbf:
+        phi_list = []
+        
+        nn_in_list = [h_i(self.x_sym, self.xpred_list, self.ypred_list) for h_i in h_funcs ]
+        alpha_list = self.alpha_nn(cs.vertcat(self.x_sym, *nn_in_list)) 
+        
+        for idx, h_i in enumerate(h_funcs):
+            # dcbf(h_i, x_sym, u_sym, dynamics_f, [alpha_fn]) returns a scalar MX
+            
+            alpha_fn = lambda y: alpha_list[idx] * y
+            
+            phi_i = self.dcbf(h_i, self.x_sym, self.u_sym, self.dynamics_f, [alpha_fn])
+            phi_list.append(phi_i)
 
-        return cs.Function('cbff', [self.x_sym, self.u_sym, self.nn.get_flat_parameters()], [cbf], ['x','u', 'alpha params'], ['cbff'])
+        # 3) Vertically stack all φ_i into a single (m×1) MX:
+        phi_vec = cs.vertcat(*phi_list)
+
+        # 4) Wrap into one casadi.Function.  Its inputs are (x, u, all‐NN‐weights‐and‐biases),
+        #    and its single output is that m×1 vector “phi_vec.”
+        return cs.Function(
+            "cbff",
+            [self.x_sym, self.u_sym, self.nn.get_flat_parameters(), self.xpred_list, self.ypred_list],
+            [phi_vec],
+            ["x", "u", "alpha_params", "vx_list", "vy_list"],
+            ["phi_vec"],
+            )
+
 
     def cbf_const(self):
-
-        """""
-        used to construct cbf constraints 
         """
+        Build the full CBF‐constraint vector over horizon × m obstacles, with slack.
+        Each column k gives [φ₁(x_k,u_k); …; φₘ(x_k,u_k)] + [s₁ₖ; …; sₘₖ].
+        Stacked vertically, this becomes an (m*horizon)×1 vector.
+        """
+        cbf_fn = self.cbf_func()      # the Function built above
+        # m = len(self.obst.positions)  # number of obstacles
+        cons = []
 
-        cbf_func = self.cbf_func()
-        cbf_const_list = []
         for k in range(self.horizon):
+                xk      = self.X_sym[:, k]        # 4×1
+                uk      = self.U_sym[:, k]        # 2×1
+                phi_k   = cbf_fn(xk, uk, self.nn.get_flat_parameters(), self.xpred_hor[k*self.m:(k+1)*self.m], self.ypred_hor[k*self.m:(k+1)*self.m])  # m×1
+                slack_k = self.S_sym[:, k]        # m×1
+                cons.append(phi_k + slack_k)      # m×1
 
-            cbf_const_list.append(cbf_func(self.X_sym[:,k], self.U_sym[:,k], self.nn.get_flat_parameters()) + self.S_sym[:,k]) 
+        # Stack all horizon‐columns into one big (m*horizon)×1 vector:
+        self.cbf_const_list = cs.vertcat(*cons)
+        return
 
-        self.cbf_const_list = cs.vertcat(*cbf_const_list)
-        print(f"here is the self.cbf_constlist; {self.cbf_const_list}")
-        return 
-    
+
     def cbf_const_noslack(self):
-
-        """""
-        used to construct cbf constraints 
         """
+        Same as cbf_const, but omit slack.  We simply stack every φ_k(x,u) over k=0..horizon-1.
+        Result is an (m*horizon)×1 vector of pure CBF‐constraints.
+        """
+        cbf_fn = self.cbf_func()
+        cons = []
 
-        cbf_func = self.cbf_func()
-        cbf_const_list = []
         for k in range(self.horizon):
+                xk    = self.X_sym[:, k]
+                uk    = self.U_sym[:, k]
+                phi_k = cbf_fn(xk, uk, self.nn.get_flat_parameters(), self.xpred_hor[k*self.m:(k+1)*self.m], self.ypred_hor[k*self.m:(k+1)*self.m])  # m×1
+                print(f"{self.xpred_hor[k*self.m].shape} and {self.ypred_hor[k*self.m].shape}")
+                cons.append(phi_k)
 
-            cbf_const_list.append(cbf_func(self.X_sym[:,k], self.U_sym[:,k], self.nn.get_flat_parameters())) 
-
-        self.cbf_const_list_noslack = cs.vertcat(*cbf_const_list)
-        print(f"here is the self.cbf_constlist; {self.cbf_const_list_noslack}")
-        return 
+        self.cbf_const_list_noslack = cs.vertcat(*cons)
+        print(f"self.m shape :  {self.m}")
+        print(f"cbf_const_list_noslack shape: {self.cbf_const_list_noslack.shape}")
+        return
     
     def objective_method(self):
 
@@ -478,8 +685,8 @@ class MPC:
         stage_cost = sum(
             (self.X_sym[:, k].T @ self.Q_sym @ self.X_sym[:, k] + 
             self.U_sym[:, k].T @ self.R_sym @ self.U_sym[:, k] + 
-            self.weight_cbf * self.S_sym[:,k])
-            for k in range(self.horizon)
+            self.weight_cbf * self.S_sym[m,k])
+            for m in range (self.m) for k in range(self.horizon)
         )
         #slack penalty
         terminal_cost = cs.bilin((self.P_sym), self.X_sym[:, -1])
@@ -527,7 +734,8 @@ class MPC:
 
         nlp = {
             "x": cs.vertcat(X_flat, U_flat),
-            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, R_sym_flat, self.nn.get_flat_parameters()),
+            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, 
+                            R_sym_flat, self.nn.get_flat_parameters(), self.xpred_hor, self.ypred_hor),
             "f": self.objective_noslack, 
             "g": cs.vertcat(self.state_const_list, -self.cbf_const_list_noslack),
         }
@@ -540,7 +748,7 @@ class MPC:
             "eval_errors_fatal": True,
             "error_on_fail": False,
             "calc_lam_p": True,
-            "fatrop": {"max_iter": 500, "print_level": 0, "warm_start_init_point": True},
+            "fatrop": {"max_iter": 500, "print_level": 0},
         }
 
         MPC_solver = cs.nlpsol("solver", "fatrop", nlp, opts)
@@ -568,7 +776,8 @@ class MPC:
 
         nlp = {
             "x": cs.vertcat(X_flat, U_flat, S_flat),
-            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, R_sym_flat, self.nn.get_flat_parameters()),
+            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, 
+                            R_sym_flat, self.nn.get_flat_parameters(), self.xpred_hor, self.ypred_hor),
             "f": self.objective, 
             "g": cs.vertcat(self.state_const_list, -self.cbf_const_list),
         }
@@ -581,7 +790,7 @@ class MPC:
             "eval_errors_fatal": True,
             "error_on_fail": False,
             "calc_lam_p": True,
-            "fatrop": {"max_iter": 500, "print_level": 0, "warm_start_init_point": True},
+            "fatrop": {"max_iter": 500, "print_level": 0},
         }
 
         MPC_solver = cs.nlpsol("solver", "fatrop", nlp, opts)
@@ -613,7 +822,8 @@ class MPC:
 
         nlp = {
             "x": cs.vertcat(X_flat, U_flat, S_flat),
-            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, R_sym_flat, self.nn.get_flat_parameters(), rand_noise),
+            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, R_sym_flat, 
+                            self.nn.get_flat_parameters(), rand_noise, self.xpred_hor, self.ypred_hor),
             "f": self.objective + rand_noise.T @ self.U_sym[:,0], 
             "g": cs.vertcat(self.state_const_list, -self.cbf_const_list),
         }
@@ -626,7 +836,7 @@ class MPC:
             "eval_errors_fatal": True,
             "error_on_fail": False,
             "calc_lam_p": False,
-            "fatrop": {"max_iter": 500, "print_level": 0, "warm_start_init_point": True},
+            "fatrop": {"max_iter": 500, "print_level": 0},
         }
 
         MPC_solver = cs.nlpsol("solver", "fatrop", nlp, opts)
@@ -650,20 +860,20 @@ class MPC:
 
       
         # X_con + U_con + S_con 
-        lagrange_mult_x_lb_sym = cs.MX.sym("lagrange_mult_x_lb_sym", self.ns * (self.horizon+1) + self.na * (self.horizon) + 1 * (self.horizon))
-        lagrange_mult_x_ub_sym = cs.MX.sym("lagrange_mult_x_ub_sym", self.ns * (self.horizon+1) + self.na * (self.horizon) + 1 * (self.horizon))
-        lagrange_mult_g_sym = cs.MX.sym("lagrange_mult_g_sym", 1*self.ns*(self.horizon) + self.horizon)
+        lagrange_mult_x_lb_sym = cs.MX.sym("lagrange_mult_x_lb_sym", self.ns * (self.horizon+1) + self.na * (self.horizon) + self.nn.obst.obstacle_num * (self.horizon))
+        lagrange_mult_x_ub_sym = cs.MX.sym("lagrange_mult_x_ub_sym", self.ns * (self.horizon+1) + self.na * (self.horizon) + self.nn.obst.obstacle_num  * (self.horizon))
+        lagrange_mult_g_sym = cs.MX.sym("lagrange_mult_g_sym", 1*self.ns*(self.horizon) + self.nn.obst.obstacle_num*self.horizon)
 
         # construct 
-        X_lower_bound = -5 * np.array([1, 1, 1, 1])#-1e6 * 5 * np.ones(mpc.ns * (mpc.horizon))
-        X_upper_bound = 5 * np.array([1, 1, 1, 1])#1e6 * 5 * np.ones(mpc.ns  * (mpc.horizon))
+        X_lower_bound = -CONSTRAINTS_X * np.ones(self.ns * (self.horizon))#-1e6 * CONSTRAINTS_X * np.ones(mpc.ns * (mpc.horizon))
+        X_upper_bound = CONSTRAINTS_X * np.ones(self.ns * (self.horizon)) #1e6 * CONSTRAINTS_X * np.ones(mpc.ns  * (mpc.horizon))
 
         U_lower_bound = -np.ones(self.na * (self.horizon-1))
         U_upper_bound = np.ones(self.na * (self.horizon-1))  
 
         # X_con + U_con + S_con + Sx_con
-        lbx = cs.vertcat(self.X_sym[:,0], cs.DM(X_lower_bound), self.U_sym[:,0], cs.DM(U_lower_bound), np.zeros(self.horizon)) 
-        ubx = cs.vertcat(self.X_sym[:,0], cs.DM(X_upper_bound), self.U_sym[:,0], cs.DM(U_upper_bound), np.inf*np.ones(self.horizon))
+        lbx = cs.vertcat(self.X_sym[:,0], cs.DM(X_lower_bound), self.U_sym[:,0], cs.DM(U_lower_bound), np.zeros(self.nn.obst.obstacle_num *self.horizon)) 
+        ubx = cs.vertcat(self.X_sym[:,0], cs.DM(X_upper_bound), self.U_sym[:,0], cs.DM(U_upper_bound), np.inf*np.ones(self.nn.obst.obstacle_num *self.horizon))
 
         # construct lower bound here 
         lagrange1 = lagrange_mult_x_lb_sym.T @ (opt_solution - lbx) #positive @ negative
@@ -688,12 +898,14 @@ class MPC:
             [
                 self.A_sym, self.B_sym, self.b_sym, self.Q_sym, self.R_sym,
                 self.P_sym, lagrange_mult_x_lb_sym, lagrange_mult_x_ub_sym, 
-                lagrange_mult_g_sym, X_flat, U_flat, S_flat, self.nn.get_flat_parameters()
+                lagrange_mult_g_sym, X_flat, U_flat, S_flat, self.nn.get_flat_parameters(),
+                self.xpred_hor, self.ypred_hor
             ],
             [qlagrange_sens],
             [
                 'A_sym', 'B_sym', 'b_sym', 'Q_sym', 'R_sym','P_sym', 'lagrange_mult_x_lb_sym', 
-                'lagrange_mult_x_ub_sym', 'lagrange_mult_g_sym', 'X', 'U', 'S', 'inputs_NN'
+                'lagrange_mult_x_ub_sym', 'lagrange_mult_g_sym', 'X', 'U', 'S', 'inputs_NN',
+                'xpred_hor', 'ypred_hor'
             ],
             ['qlagrange_sens']
         )
@@ -718,41 +930,43 @@ class MPC:
         return qlagrange_fn, _
     
     def qp_solver_fn(self):
-            #implementing optimiazation for one time step
+        """
+        Constructs QP solve for parameter updates
+        """
 
-            Hessian_sym = cs.MX.sym("Hessian", self.theta.shape[0]*self.theta.shape[0])
-            p_gradient_sym = cs.MX.sym("gradient", self.theta.shape[0])
+        Hessian_sym = cs.MX.sym("Hessian", self.theta.shape[0]*self.theta.shape[0])
+        p_gradient_sym = cs.MX.sym("gradient", self.theta.shape[0])
 
-            delta_theta = cs.MX.sym("delta_theta", self.theta.shape[0])
-            theta = cs.MX.sym("delta_theta", self.theta.shape[0])
+        delta_theta = cs.MX.sym("delta_theta", self.theta.shape[0])
+        theta = cs.MX.sym("delta_theta", self.theta.shape[0])
 
-            lambda_reg = 1e-6
-    
-            qp = {
-                "x": cs.vertcat(delta_theta),
-                "p": cs.vertcat(theta, Hessian_sym, p_gradient_sym),
-                "f": 0.5*delta_theta.T @ Hessian_sym.reshape((self.theta.shape[0], self.theta.shape[0])) @ delta_theta +  p_gradient_sym.T @ (delta_theta) + lambda_reg/2 * delta_theta.T @ delta_theta, 
-                "g": theta + delta_theta,
-            }
+        lambda_reg = 1e-6
 
-            opts = {
-                "error_on_fail": False,
-                "print_time": False,
+        qp = {
+            "x": cs.vertcat(delta_theta),
+            "p": cs.vertcat(theta, Hessian_sym, p_gradient_sym),
+            "f": 0.5*delta_theta.T @ Hessian_sym.reshape((self.theta.shape[0], self.theta.shape[0])) @ delta_theta +  p_gradient_sym.T @ (delta_theta) + lambda_reg/2 * delta_theta.T @ delta_theta, 
+            "g": theta + delta_theta,
+        }
+
+        opts = {
+            "error_on_fail": False,
+            "print_time": False,
+            "verbose": False,
+            "max_io": False,
+            "osqp": {
+                "eps_abs": 1e-9,
+                "eps_rel": 1e-9,
+                "max_iter": 10000,
+                "eps_prim_inf": 1e-9,
+                "eps_dual_inf": 1e-9,
+                "polish": True,
+                "scaling": 100,
                 "verbose": False,
-                "max_io": False,
-                "osqp": {
-                    "eps_abs": 1e-9,
-                    "eps_rel": 1e-9,
-                    "max_iter": 10000,
-                    "eps_prim_inf": 1e-9,
-                    "eps_dual_inf": 1e-9,
-                    "polish": True,
-                    "scaling": 100,
-                    "verbose": False,
-                },
-            }
+            },
+        }
 
-            return cs.qpsol('solver','osqp', qp, opts)
+        return cs.qpsol('solver','osqp', qp, opts)
     
 
 ####################### RL #######################
@@ -760,14 +974,16 @@ class MPC:
 
 class RLclass:
 
-        def __init__(self, params_innit, seed, alpha, sampling_time, gamma, decay_rate, layers_list, noise_scalingfactor, noise_variance, patience_threshold, lr_decay_factor):
+        def __init__(self, params_innit, seed, alpha, gamma, decay_rate, layers_list, noise_scalingfactor, 
+                     noise_variance, patience_threshold, lr_decay_factor, horizon, positions, radii, modes, mode_params):
             self.seed = seed
 
             # enviroment class
-            self.env = env(sampling_time=sampling_time)
+            self.env = env()
 
             # mpc class
-            self.mpc = MPC(sampling_time, layers_list)
+            self.mpc = MPC(layers_list, horizon, positions, radii)
+            self.obst_motion = ObstacleMotion(positions, modes, mode_params)
             # self.x0, _ = self.env.reset(seed=seed, options={})
             self.ns = self.mpc.ns
             self.na = self.mpc.na
@@ -778,9 +994,9 @@ class RLclass:
             self.alpha = alpha
             
             # bounds
-            #state bounded between 5 and -5
-            self.X_lower_bound = -5 * np.array([1, 1, 1, 1])#-1e6 * 5 * np.ones(mpc.ns * (mpc.horizon))
-            self.X_upper_bound = 5 * np.array([1, 1, 1, 1])#1e6 * 5 * np.ones(mpc.ns  * (mpc.horizon))
+            #state bounded between CONSTRAINTS_X and -CONSTRAINTS_X
+            self.X_lower_bound = -CONSTRAINTS_X * np.ones(self.ns * (self.horizon)) #-1e6 * CONSTRAINTS_X * np.ones(mpc.ns * (mpc.horizon))
+            self.X_upper_bound = CONSTRAINTS_X * np.ones(self.ns * (self.horizon))#1e6 * CONSTRAINTS_X * np.ones(mpc.ns  * (mpc.horizon))
 
             #state bound between 0 and 0, to make sure Ax +Bu = 0
             self.state_const_lbg = np.zeros(1*self.ns * (self.horizon))
@@ -788,8 +1004,8 @@ class RLclass:
 
             #cbf constraint bounded between -inf and zero --> it is inverted
             # to make sure the constraints stay the same for all of them
-            self.cbf_const_lbg = -np.inf * np.ones(1*(self.horizon))
-            self.cbf_const_ubg = np.zeros(1*(self.horizon))
+            self.cbf_const_lbg = -np.inf * np.ones(self.mpc.nn.obst.obstacle_num*(self.horizon))
+            self.cbf_const_ubg = np.zeros(self.mpc.nn.obst.obstacle_num*(self.horizon))
             # gamma
             self.gamma = gamma
 
@@ -823,22 +1039,6 @@ class RLclass:
             self.exp_avg = np.zeros(theta_vector_num.shape[0])
             self.exp_avg_sq = np.zeros(theta_vector_num.shape[0])
             self.adam_iter = 1
-            
-                    #warmstart variables
-            self.x_prev_VMPC        = cs.DM()  
-            self.lam_x_prev_VMPC    = cs.DM()  
-            self.lam_g_prev_VMPC    = cs.DM()  
-
-            self.x_prev_QMPC        = cs.DM()  
-            self.lam_x_prev_QMPC    = cs.DM()  
-            self.lam_g_prev_QMPC    = cs.DM()  
-
-            self.x_prev_VMPCrandom  = cs.DM()  
-            self.lam_x_prev_VMPCrandom = cs.DM()  
-            self.lam_g_prev_VMPCrandom = cs.DM()
-            
-            self.best_params       = params_innit.copy()
-            
         
         
         def save_figures(self, figures, experiment_folder, save_in_subfolder=False):
@@ -887,7 +1087,7 @@ class RLclass:
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            self.save_figures([(fig_p, 'P_B_update_over_time.svg')], experiment_folder)
+            self.save_figures([(fig_p, 'P_B_update_over_time')], experiment_folder)
             plt.close(fig_p)
 
             # 2. Plot just the NN mean
@@ -899,7 +1099,7 @@ class RLclass:
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            self.save_figures([(fig_nn, 'NN_mean_B_update_over_time.svg')], experiment_folder)
+            self.save_figures([(fig_nn, 'NN_mean_B_update_over_time')], experiment_folder)
             plt.close(fig_nn)
         
         def ADAM(self, iteration, gradient, exp_avg, exp_avg_sq,
@@ -927,7 +1127,7 @@ class RLclass:
             """
 
             if current_stage_cost < self.best_stage_cost:
-                self.best_params       = params.copy()
+                best_params = params.copy() 
                 self.best_stage_cost = current_stage_cost
                 self.current_patience = 0
             else:
@@ -938,8 +1138,9 @@ class RLclass:
                 self.alpha *= self.lr_decay_factor  # decay 
                 print(f"Learning rate decreased from {old_alpha} to {self.alpha} due to no stage cost improvement.")
                 self.current_patience = 0  # reset 
-                params = self.best_params
-            return params        
+                params = best_params  # revert to best params
+
+            return params
 
         # def noise_scale_by_distance(x, y, max_radius=3):
         #     # i might remove this because it doesnt allow for exploration of the last states which is important
@@ -990,7 +1191,7 @@ class RLclass:
             print("Warning: Cholesky decomposition failed after maximum iterations; returning zero matrix.")
             return np.zeros((A.shape[0], A.shape[0]))
 
-        def V_MPC(self, params, x):
+        def V_MPC(self, params, x, xpred_list, ypred_list):
             # bounds
 
             # input bounded between 1 and -1
@@ -998,8 +1199,8 @@ class RLclass:
             U_upper_bound = np.ones(self.na * (self.horizon))
 
             # state constraints (first state is bounded to be x0), omega cannot be 0
-            lbx = np.concatenate([np.array(x).flatten(), self.X_lower_bound, U_lower_bound,  np.zeros(self.horizon)])  
-            ubx = np.concatenate([np.array(x).flatten(), self.X_upper_bound, U_upper_bound,  np.inf*np.ones(self.horizon)])
+            lbx = np.concatenate([np.array(x).flatten(), self.X_lower_bound, U_lower_bound,  np.zeros(self.mpc.nn.obst.obstacle_num *self.horizon)])  
+            ubx = np.concatenate([np.array(x).flatten(), self.X_upper_bound, U_upper_bound,  np.inf*np.ones(self.mpc.nn.obst.obstacle_num *self.horizon)])
 
             #lower and upper bound for state and cbf constraints 
             lbg = np.concatenate([self.state_const_lbg, self.cbf_const_lbg])  
@@ -1012,10 +1213,7 @@ class RLclass:
             Q_flat = cs.reshape(params["Q"], -1, 1)
             R_flat = cs.reshape(params["R"], -1, 1)
 
-            solution = self.solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, Q_flat, R_flat,  params["nn_params"]),
-                x0    = self.x_prev_VMPC,
-                lam_x0 = self.lam_x_prev_VMPC,
-                lam_g0 = self.lam_g_prev_VMPC,
+            solution = self.solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, Q_flat, R_flat,  params["nn_params"], xpred_list, ypred_list),
                 ubx=ubx,  
                 lbx=lbx,
                 ubg=ubg,
@@ -1024,14 +1222,11 @@ class RLclass:
 
             #extract solution from solver 
             u_opt = solution["x"][self.ns * (self.horizon+1):self.ns * (self.horizon+1) + self.na]
-            
-            self.x_prev_VMPC     = solution["x"]
-            self.lam_x_prev_VMPC = solution["lam_x"]
-            self.lam_g_prev_VMPC = solution["lam_g"]
+
 
             return u_opt, solution["f"]
         
-        def V_MPC_rand(self, params, x, rand):
+        def V_MPC_rand(self, params, x, rand, xpred_list, ypred_list):
             """
             same function as V_MPC but now with randomness
             """
@@ -1040,8 +1235,8 @@ class RLclass:
             U_lower_bound = -np.ones(self.na * (self.horizon))
             U_upper_bound = np.ones(self.na * (self.horizon))
 
-            lbx = np.concatenate([np.array(x).flatten(), self.X_lower_bound, U_lower_bound,  np.zeros(self.horizon)])  
-            ubx = np.concatenate([np.array(x).flatten(),self.X_upper_bound, U_upper_bound,  np.inf*np.ones(self.horizon)])
+            lbx = np.concatenate([np.array(x).flatten(), self.X_lower_bound, U_lower_bound,  np.zeros(self.mpc.nn.obst.obstacle_num *self.horizon)])  
+            ubx = np.concatenate([np.array(x).flatten(),self.X_upper_bound, U_upper_bound,  np.inf*np.ones(self.mpc.nn.obst.obstacle_num *self.horizon)])
             
 
             lbg = np.concatenate([self.state_const_lbg, self.cbf_const_lbg])  
@@ -1055,10 +1250,7 @@ class RLclass:
             R_flat = cs.reshape(params["R"], -1, 1)
 
 
-            solution = self.solver_inst_random(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, Q_flat, R_flat, params["nn_params"], rand),
-                x0    = self.x_prev_VMPCrandom,
-                lam_x0 = self.lam_x_prev_VMPCrandom,
-                lam_g0 = self.lam_g_prev_VMPCrandom,
+            solution = self.solver_inst_random(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, Q_flat, R_flat, params["nn_params"], rand, xpred_list, ypred_list),
                 ubx=ubx,  
                 lbx=lbx,
                 ubg=ubg,
@@ -1066,22 +1258,18 @@ class RLclass:
             )
 
             u_opt = solution["x"][self.ns * (self.horizon+1):self.ns * (self.horizon+1) + self.na]
-            
-            self.x_prev_VMPCrandom = solution["x"]
-            self.lam_x_prev_VMPCrandom = solution["lam_x"]
-            self.lam_g_prev_VMPCrandom = solution["lam_g"]
 
             return u_opt
 
-        def Q_MPC(self, params, action, x):
+        def Q_MPC(self, params, action, x, xpred_list, ypred_list):
 
             # bounds
             U_lower_bound = -np.ones(self.na * (self.horizon-1))
             U_upper_bound = np.ones(self.na * (self.horizon-1))
 
             #here since its Q value we also give action
-            lbx = np.concatenate([np.asarray(x).flatten(), self.X_lower_bound, np.asarray(action).flatten(), U_lower_bound,  np.zeros(self.horizon)])  
-            ubx = np.concatenate([np.asarray(x).flatten(), self.X_upper_bound, np.asarray(action).flatten(), U_upper_bound, np.inf*np.ones(self.horizon)])
+            lbx = np.concatenate([np.asarray(x).flatten(), self.X_lower_bound, np.asarray(action).flatten(), U_lower_bound,  np.zeros(self.mpc.nn.obst.obstacle_num *self.horizon)])  
+            ubx = np.concatenate([np.asarray(x).flatten(), self.X_upper_bound, np.asarray(action).flatten(), U_upper_bound, np.inf*np.ones(self.mpc.nn.obst.obstacle_num *self.horizon)])
 
             lbg = np.concatenate([self.state_const_lbg, self.cbf_const_lbg])  
             ubg = np.concatenate([self.state_const_ubg, self.cbf_const_ubg])
@@ -1093,10 +1281,7 @@ class RLclass:
             Q_flat = cs.reshape(params["Q"], -1, 1)
             R_flat = cs.reshape(params["R"], -1, 1)
 
-            solution = self.solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, Q_flat, R_flat, params["nn_params"]),
-                x0    = self.x_prev_QMPC,
-                lam_x0 = self.lam_x_prev_QMPC,
-                lam_g0 = self.lam_g_prev_QMPC,
+            solution = self.solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, Q_flat, R_flat, params["nn_params"], xpred_list, ypred_list),
                 ubx=ubx,  
                 lbx=lbx,
                 ubg=ubg,
@@ -1108,11 +1293,6 @@ class RLclass:
             lam_lbx = -cs.fmin(solution["lam_x"], 0)
             lam_ubx = cs.fmax(solution["lam_x"], 0)
             lam_p = solution["lam_p"]
-            
-            self.lam_g_prev_QMPC = solution["lam_g"]
-            self.x_prev_QMPC = solution["x"]
-            self.lam_x_prev_QMPC = solution["lam_x"]
-
 
             return solution["x"], solution["f"], lagrange_mult_g, lam_lbx, lam_ubx, lam_p
             
@@ -1143,17 +1323,16 @@ class RLclass:
         def evaluation_step(self, S, params, experiment_folder, episode_duration):
                 
                 state, _ = self.env.reset(seed=self.seed, options={})
-
+                self.obst_motion.reset()
+                
                 states_eval = []
                 actions_eval = []
                 stage_cost_eval = []
                 
-                self.x_prev_VMPC        = cs.DM()  
-                self.lam_x_prev_VMPC    = cs.DM()  
-                self.lam_g_prev_VMPC    = cs.DM() 
+                xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
 
                 for i in range(episode_duration):
-                    action, _ = self.V_MPC(params=params, x=state)
+                    action, _ = self.V_MPC(params=params, x=state, xpred_list=xpred_list, ypred_list=ypred_list)
 
                     action = cs.fmin(cs.fmax(cs.DM(action), -1), 1)
                     state, _, done, _, _ = self.env.step(action)
@@ -1161,6 +1340,7 @@ class RLclass:
                     actions_eval.append(action)
 
                     stage_cost_eval.append(self.stage_cost(action, state, S))
+                    xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
 
                 states_eval = np.array(states_eval)
                 actions_eval = np.array(actions_eval)
@@ -1174,10 +1354,12 @@ class RLclass:
                 )
 
                 # Plot the obstacle
-                circle = plt.Circle((-2, -2.25), 1.5, color="k", fill=False, linewidth=2)
+                for (cx, cy), r in zip(self.mpc.nn.obst.positions, self.mpc.nn.obst.radii):
+                            circle = plt.Circle((cx, cy), r, color="k", fill=False, linewidth=2)
+                            plt.gca().add_patch(circle)
                 plt.gca().add_patch(circle)
-                plt.xlim([-5, 0])
-                plt.ylim([-5, 0])
+                plt.xlim([-CONSTRAINTS_X, 0])
+                plt.ylim([-CONSTRAINTS_X, 0])
 
                 # Set labels and title
                 plt.xlabel("$x$")
@@ -1221,17 +1403,17 @@ class RLclass:
                 print(f"Stage Cost: {sum_stage_cost}")
                 
                 figs = [
-                                (figstates, f"states_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg"),
-                                (figactions, f"actions_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg"),
-                                (figstagecost, f"stagecost_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg"),
-                                (figsvelocity, f"velocity_MPCeval_{self.eval_count}_S_{sum_stage_cost}.svg")
+                                (figstates, f"states_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
+                                (figactions, f"actions_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
+                                (figstagecost, f"stagecost_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
+                                (figsvelocity, f"velocity_MPCeval_{self.eval_count}_S_{sum_stage_cost}.png")
                 ]
 
 
                 self.save_figures(figs, experiment_folder, "Evaluation")
                 plt.close("all")
 
-                _ = self.update_learning_rate(sum_stage_cost, params)
+                self.update_learning_rate(sum_stage_cost, params)
 
                 self.eval_count += 1
 
@@ -1328,38 +1510,19 @@ class RLclass:
             states = [(x)]
 
             actions = []
-
-            self.fwd_func = self.mpc.nn.numerical_forward()
+            
+            xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
 
             #intialize
             k = 0
             self.error_happened = False
             self.eval_count = 1
-            
-            #warmstart variables
-            self.x_prev_VMPC        = cs.DM()  
-            self.lam_x_prev_VMPC    = cs.DM()  
-            self.lam_g_prev_VMPC    = cs.DM()  
 
-            self.x_prev_QMPC        = cs.DM()  
-            self.lam_x_prev_QMPC    = cs.DM()  
-            self.lam_g_prev_QMPC    = cs.DM()  
-
-            self.x_prev_VMPCrandom  = cs.DM()  
-            self.lam_x_prev_VMPCrandom = cs.DM()  
-            self.lam_g_prev_VMPCrandom = cs.DM()
-
-            for i in range(1,episode_duration*num_episodes):
-
-                if i == 133*10*3000:
-                    self.alpha = self.alpha*0.01
-
-                # if i == 130*10*3000:
-                #     self.alpha = self.alpha*0.01    
+            for i in range(1,episode_duration*num_episodes):  
                 
                 rand = self.noise_scalingfactor*self.np_random.normal(loc=0, scale=self.noise_variance, size = (2,1))
 
-                u = self.V_MPC_rand(params=params, x=x, rand = rand)
+                u = self.V_MPC_rand(params=params, x=x, rand = rand, xpred_list=xpred_list, ypred_list=ypred_list)
                 u = cs.fmin(cs.fmax(cs.DM(u), -1), 1)
 
                 actions.append(u)
@@ -1370,7 +1533,7 @@ class RLclass:
                     self.error_happened = True
 
      
-                solution, Qcost, lagrange_mult_g, lam_lbx, lam_ubx, _ = self.Q_MPC(params=params, action=u, x=x)
+                solution, Qcost, lagrange_mult_g, lam_lbx, lam_ubx, _ = self.Q_MPC(params=params, action=u, x=x, xpred_list=xpred_list, ypred_list=ypred_list)
      
 
                 statsq = self.solver_inst.stats()
@@ -1393,7 +1556,7 @@ class RLclass:
                 # print(f"x_2: {x}")
                 # print(f"params_3: {params}")
 
-                _, Vcost = self.V_MPC(params=params, x=x)
+                _, Vcost = self.V_MPC(params=params, x=x, xpred_list=xpred_list, ypred_list=ypred_list)
 
                 statsv = self.solver_inst.stats()
                 if statsv["success"] == False:
@@ -1416,7 +1579,8 @@ class RLclass:
                     lagrange_mult_x_lb_sym=lam_lbx,
                     lagrange_mult_x_ub_sym=lam_ubx,
                     lagrange_mult_g_sym=lagrange_mult_g,
-                    X=X, U=U, S=S, inputs_NN=params["nn_params"]
+                    X=X, U=U, S=S, inputs_NN=params["nn_params"],
+                    xpred_hor=xpred_list, ypred_hor=ypred_list
                 )['qlagrange_sens']
 
                 # first order update
@@ -1431,7 +1595,10 @@ class RLclass:
                 else:
                     TD_temp.append(cs.DM(np.nan))
                     self.error_happened = False
-
+                    
+                _ = self.obst_motion.step()
+        
+                xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
 
                 if (k == episode_duration):                     
                     # -1 because loop starts from 1
@@ -1457,20 +1624,10 @@ class RLclass:
                     stage_cost_history = []
                     TD_episode = []
 
+                    # reset the environment and the obstacle motion
                     x, _ = self.env.reset(seed=self.seed, options={})
+                    self.obst_motion.reset()
                     k=0
-                    
-                    self.x_prev_VMPC        = cs.DM()  
-                    self.lam_x_prev_VMPC    = cs.DM()  
-                    self.lam_g_prev_VMPC    = cs.DM()  
-
-                    self.x_prev_QMPC        = cs.DM()  
-                    self.lam_x_prev_QMPC    = cs.DM()  
-                    self.lam_g_prev_QMPC    = cs.DM()  
-
-                    self.x_prev_VMPCrandom  = cs.DM()  
-                    self.lam_x_prev_VMPCrandom = cs.DM()  
-                    self.lam_g_prev_VMPCrandom = cs.DM()
 
                     print("reset")
 
@@ -1489,10 +1646,11 @@ class RLclass:
                         )
 
                         # Plot the obstacle
-                        circle = plt.Circle((-2, -2.25), 1.5, color="k", fill=False, linewidth=2)
-                        plt.gca().add_patch(circle)
-                        plt.xlim([-5, 0])
-                        plt.ylim([-5, 0])
+                        for (cx, cy), r in zip(self.mpc.nn.obst.positions, self.mpc.nn.obst.radii):
+                            circle = plt.Circle((cx, cy), r, color="k", fill=False, linewidth=2)
+                            plt.gca().add_patch(circle)
+                        plt.xlim([-CONSTRAINTS_X, 0])
+                        plt.ylim([-CONSTRAINTS_X, 0])
 
                         # Set labels and title
                         plt.xlabel("$x$")
@@ -1514,18 +1672,10 @@ class RLclass:
                         plt.tight_layout()
                         # plt.show()
 
-                        positions = states[1:, :2]  # assuming first 2 entries are x and y
-                        circle_center = np.array([-2, -2.25])
-                        circle_radius = 1.7
-                        distances = np.sqrt((positions[:, 0] - circle_center[0])**2 +
-                                            (positions[:, 1] - circle_center[1])**2)
-                        mask_near = distances <= circle_radius
-                        mask_far = distances > circle_radius
+                        # Plot TD
                         indices = np.arange(len(TD_temp))
-
                         figtdtemp = plt.figure(figsize=(10, 5))
-                        plt.scatter(indices[mask_near], TD_temp[mask_near], c='red', label='Near Circle')
-                        plt.scatter(indices[mask_far], TD_temp[mask_far], c='blue', label='Far from Circle')
+                        plt.scatter(indices,TD_temp, label='TD')
                         plt.yscale('log')
                         plt.title("TD Over Training (Log Scale) - Colored by Proximity")
                         plt.xlabel("Iteration $k$")
@@ -1577,12 +1727,12 @@ class RLclass:
                         # plt.show()
 
                         figures_training = [
-                            (figstate, f"position_plotat_{i}.svg"),
-                            (figvelocity, f"velocity_plotat_{i}.svg"),
-                            (figtdtemp, f"TD_plotat_{i}.svg"),
-                            (figactions, f"action_plotat_{i}.svg"),
-                            (P_figgrad, f"P_grad_plotat_{i}.svg"),
-                            (NN_figgrad, f"NN_grad_plotat_{i}.svg"),
+                            (figstate, f"position_plotat_{i}"),
+                            (figvelocity, f"velocity_plotat_{i}"),
+                            (figtdtemp, f"TD_plotat_{i}"),
+                            (figactions, f"action_plotat_{i}"),
+                            (P_figgrad, f"P_grad_plotat_{i}"),
+                            (NN_figgrad, f"NN_grad_plotat_{i}"),
                             ]
                         self.save_figures(figures_training, experiment_folder, "Learning")
                         plt.close("all")
@@ -1612,10 +1762,10 @@ class RLclass:
        
 
             figP = plt.figure(figsize=(10, 5))
-            plt.plot(params_history_P[:, 0, 0], label=r"$P_{1,1}$")
-            plt.plot(params_history_P[:, 1, 1], label=r"$P_{2,2}$")
-            plt.plot(params_history_P[:, 2, 2], label=r"$P_{3,3}$")
-            plt.plot(params_history_P[:, 3, 3], label=r"$P_{4,4}$")
+            plt.plot(params_history_P[:, 0, 0], label=r"$P[1,1]$")
+            plt.plot(params_history_P[:, 1, 1], label=r"$P[2,2]$")
+            plt.plot(params_history_P[:, 2, 2], label=r"$P[3,3]$")
+            plt.plot(params_history_P[:, 3, 3], label=r"$P[4,4]$")
             # plt.title("Parameter: P",        fontsize=24)
             plt.xlabel("Update Number",     fontsize=20)
             plt.ylabel("Value",             fontsize=20)
@@ -1659,12 +1809,9 @@ class RLclass:
             running_mean = s.rolling(window, center=True, min_periods=1).mean().values
             running_std  = s.rolling(window, center=True, min_periods=1).std().values
 
-            # now plot everything
+            # plt
             figstagecost_nice = plt.figure(figsize=(10,5))
             ax = figstagecost_nice.add_subplot(1,1,1)
-
-            # # raw points
-            # ax.plot(episodes, cost, 'o', markersize=3, alpha=0.5, label="Stage Cost")
 
             # running mean
             ax.plot(episodes, running_mean, '-', linewidth=2, label=f"Stage Cost mean ({window}-ep)")
@@ -1675,9 +1822,7 @@ class RLclass:
                             running_mean + running_std,
                             alpha=0.3,
                             label=f"Stage Cost std ({window}-ep)")
-            # add a horizontal line at 0
 
-            # only do log‐y if there's something strictly >0
             if np.any(cost > 0):
                 ax.set_yscale('log')
 
@@ -1690,15 +1835,15 @@ class RLclass:
 
 
             figures_to_save = [
-                (figP, "P.svg"),
-                (figstagecost, "stagecost.svg"),
-                (figstagecost_nice, "stagecost_smoothed.svg"),
-                (figtd, "TD.svg")
+                (figP, "P"),
+                (figstagecost, "stagecost"),
+                (figstagecost_nice, "stagecost_smoothed"),
+                (figtd, "TD")
 
             ]
             self.save_figures(figures_to_save, experiment_folder)
             plt.close("all")
             
-            return self.best_params
+            return params
         
         

@@ -214,7 +214,7 @@ class ObstacleMotion:
     
     def _step_bounce(self, i):
         """
-        Step‐bounce motion along the x‐axis for obstacle i.
+        Step-bounce motion along the x-axis for obstacle i.
 
         - bounces between xmin and xmax
         - flips direction when hitting a bound
@@ -225,7 +225,7 @@ class ObstacleMotion:
         mp     = self.mode_params[i]
         xmin, xmax = mp["bounds"]         
         speed = mp["speed"]                
-        # read+update your current direction in-place:
+        # read+update current direction in-place:
         dir   = mp.get("dir", -1)          
         next_x = self.cx[i] - dir*speed*self.dt
         if next_x < xmin or next_x > xmax:
@@ -318,7 +318,7 @@ class ObstacleMotion:
     
     
 class RNN:
-    def __init__(self, layers_list, positions, radii, horizon, mode_params):
+    def __init__(self, layers_list, positions, radii, horizon, mode_params, modes):
         #TODO: Finish commenting and cleaning this funciton and onwards
         """
         Build an Elman-style RNN for CBF-based MPC.
@@ -375,7 +375,28 @@ class RNN:
         #defining bounds for normalizations of positions of the object
         # self.bounds =[ self.obst.mode_params[i]["bounds"] for i in range(self.obst.obstacle_numm) ]
         # self.bounds = np.array(self.bounds)
-        self.bounds = np.array([mode_params[i]["bounds"] for i in range(self.obst.obstacle_num)])  # shape (m, 2)
+        self.modes       = modes
+        self.mode_params = mode_params
+
+        # self.bounds_x = np.array([mode_params[i]["bounds"] for i in range(self.obst.obstacle_num)])  # shape (m, 2)
+        # self.bounds_y = np.array([(py, py) for (_, py) in self.positions])
+        bx, by = [], []
+        for i in range(self.obst.obstacle_num):
+            px, py = self.positions[i]
+            mode   = self.modes[i]
+            mp     = self.mode_params[i]
+
+            if mode == "static":
+                bx.append((px, px))
+                by.append((py, py))
+
+            elif mode == "step_bounce":
+                xmin, xmax = mp["bounds"]
+                bx.append((xmin, xmax))
+                by.append((py, py))
+                
+        self.bounds_x = np.array(bx)  # shape (m, 2)
+        self.bounds_y = np.array(by)  # shape (m, 2)
             
 
     def relu(self, x):
@@ -396,10 +417,16 @@ class RNN:
         """
         return epsilon + (1 - epsilon) / (1 + cs.exp(-x))
     
+    def sigmoid(self, x):
+        """
+        Sigmoid shifted into (epsilon, 1) since we cant have a 0
+        """
+        return (1) / (1 + cs.exp(-x))
+    
     def normalization_z(self, rnn_input):
         
         """
-        Normalizes based on maximum and minimum values of the states and h(x) values.
+        Normalizes based on maximum and minimum values of the states, h(x) values and obstacle movement values.
 
         """
         # split the input into three to normalize each seprately
@@ -407,6 +434,9 @@ class RNN:
         h_raw    = rnn_input[self.ns:self.ns+self.obst.obstacle_num]
         pos_x    = rnn_input[self.ns+self.obst.obstacle_num:self.ns+2*self.obst.obstacle_num]
         pos_y    = rnn_input[self.ns+2*self.obst.obstacle_num:self.ns+3*self.obst.obstacle_num]
+        
+        def scale_centered(z, zmin, zmax, eps=1e-12):
+            return 2 * (z - zmin) / (zmax - zmin + eps) - 1
   
         # x_norm = (nn_input[:4] - mu_states) / sigma_states
         
@@ -417,7 +447,8 @@ class RNN:
         
         x_min = cs.DM([-Xmax, -Ymax, -Vxmax, -Vymax])
         x_max = cs.DM([   0.,    0.,  Vxmax,  Vymax ])
-        x_norm = (x_raw-x_min)/(x_max-x_min + 1e-9) # normalize the states based on the maximum values
+        # x_norm = (x_raw-x_min)/(x_max-x_min + 1e-9) # normalize the states based on the maximum values
+        x_norm = scale_centered(x_raw, x_min, x_max)
         
         # h_max_list = []
         # for (px, py), r in zip(self.positions, self.radii):
@@ -430,9 +461,17 @@ class RNN:
         (0.0,   -Ymax), (0.0,   0.0)
         ]
         h_max_list = []
-        for (px, py), r in zip(self.positions, self.radii):
-            d2 = [ (cx - px)**2 + (cy - py)**2 for (cx, cy) in corners ]
-            h_max_list.append(max(d2) - r**2)
+        
+        
+        for r, (xmin, xmax), (ymin, ymax) in zip(self.radii, self.bounds_x, self.bounds_y):
+            obs_corners = [(xmin, ymin), (xmin, ymax), (xmax, ymin), (xmax, ymax)]
+            d2 = max((rx - ox)**2 + (ry - oy)**2
+                        for (rx, ry) in corners
+                        for (ox, oy) in obs_corners)
+            h_max_list.append(d2 - r**2)
+        # for (px, py), r in zip(self.positions, self.radii):
+        #     d2 = [ (cx - px)**2 + (cy - py)**2 for (cx, cy) in corners ]
+        #     h_max_list.append(max(d2) - r**2)
                     
         h_norm_list = []
         
@@ -442,26 +481,76 @@ class RNN:
         
         for i, h_i in enumerate(h_raw_split):
             h_max_i = h_max_list[i]
-            h_norm_i = h_i / h_max_i
-            h_norm_i = cs.fmin(cs.fmax(h_norm_i, 0), 1)
+            h_norm_i = scale_centered(h_i, 0.0, h_max_i)
+            # h_norm_i = h_i / h_max_i
+            # h_norm_i = cs.fmin(cs.fmax(h_norm_i, 0), 1)
+            # h_norm_i = cs.fmin(cs.fmax(h_norm_i, -1), 1)
             h_norm_list.append(h_norm_i)
         
+        h_norm = cs.vertcat(*h_norm_list)
+        #position of object normalization
         # bounds[i] == (xmin_i, xmax_i)
-        bounds_DM = cs.DM(self.bounds)  # shape (m,2)
-        pos_x_norm = [
-            (pos_x[i] - bounds_DM[i,0]) / (bounds_DM[i,1] - bounds_DM[i,0])
-            for i in range(self.obst.obstacle_num)
-        ]
-        pos_y_norm = [
-            (pos_y[i] - bounds_DM[i,0]) / (bounds_DM[i,1] - bounds_DM[i,0])
-            for i in range(self.obst.obstacle_num)
-        ]
+        # bounds_DM_x = cs.DM(self.bounds_x)  # shape (m,2)
+        # pos_x_norm = [
+        #     (pos_x[i] - bounds_DM_x[i,0]) / (bounds_DM_x[i,1] - bounds_DM_x[i,0])
+        #     for i in range(self.obst.obstacle_num)
+        # ]
+        # pos_y_norm = [cs.DM(0.5) for _ in range(self.obst.obstacle_num)] #since it doesnt move we normalize to always be 0.5
+        
+        # pos_norm = cs.vertcat(*pos_x_norm, *pos_y_norm)
+        
+        eps = 1e-12
+        bx = cs.DM(self.bounds_x)  # (m,2)
+        by = cs.DM(self.bounds_y)  # (m,2)
+
+        pos_x_norm = []
+        pos_y_norm = []
+
+        for i in range(self.obst.obstacle_num):
+            mode_i = self.modes[i]
+
+            if mode_i == "static":
+                # stays put → constant mid-range
+                # nx = cs.DM(0.5)
+                # ny = cs.DM(0.5)
+                nx = cs.DM(0)
+                ny = cs.DM(0)
+
+            elif mode_i == "step_bounce":
+                # moves along one axis (you said: x moves, y fixed)
+                # nx = (pos_x[i] - bx[i,0]) / (bx[i,1] - bx[i,0] + eps)
+                nx = scale_centered(pos_x[i], bx[i,0], bx[i,1])
+                # ny = cs.DM(0.5)
+                ny = cs.DM(0)
+            # else:
+            #     # default: normalize both using the precomputed bounds (orbit/sinusoid/random etc.)
+            #     nx = (pos_x[i] - bx[i,0]) / (bx[i,1] - bx[i,0] + eps)
+            #     ny = (pos_y[i] - by[i,0]) / (by[i,1] - by[i,0] + eps)
+
+            # # clip to [0,1] to be safe
+            # nx = cs.fmin(cs.fmax(nx, 0), 1)
+            # ny = cs.fmin(cs.fmax(ny, 0), 1)
+
+            pos_x_norm.append(nx)
+            pos_y_norm.append(ny)
+
         pos_norm = cs.vertcat(*pos_x_norm, *pos_y_norm)
         
             
-        h_norm = cs.vertcat(*h_norm_list)
         return cs.vertcat(x_norm, h_norm, pos_norm)
+    
+    def _scale_to_spectral_radius(self, W: np.ndarray, target: float = 1.0, eps: float = 1e-12,
+                              power_iters: int | None = None) -> np.ndarray:
+        """
+        Uniform -> rescale so max biggest absolute eigenvalue = target.
+        """
 
+        eigvals = np.linalg.eigvals(W)
+        rho = np.max(np.abs(eigvals)).real
+
+        if rho > 0.0:
+            W = (float(target) / (rho + eps)) * W
+        return W
     # ─── low‐level linear + cell ─────────────────────────────────────────────────
     def linear(self, inp, weight, bias=None):
         
@@ -615,13 +704,13 @@ class RNN:
         H_stack    : MX, all hidden states over time, shape (sum(hidden_dims)*horizon × 1)
         Y_stack    : MX, all final‐layer outputs over time, shape (output_dim*horizon × 1)
         """
-
+        #TODO : CHECK IS IT REALLY GIVING THE RIGHT HIDDEN STATES BACK
         rnn_step = self.make_rnn_step()
 
         h = self.hidden_sym_list   # MX
         params = self.get_flat_parameters_list()  
 
-        h_history = []
+        h_history = [cs.vertcat(*h)] # DO I NEED TO DO THIS?
         y_history = []
         
         
@@ -629,6 +718,7 @@ class RNN:
         for i in range(self.horizon):
             x_t_raw = self.input_sym[:, i]
             x_t = self.normalization_z(x_t_raw)
+            # x_t = self.normalization_z(x_t)
             *h, y = rnn_step(*h, x_t, *params)
             h_history.append(cs.vertcat(*h))
             y_history.append(y)
@@ -673,7 +763,7 @@ class RNN:
                     self.Whh0 = cs.DM.zeros(self.layers_list[-1], self.layers_list[-1])
     
                 if i == len(self.layers_list) - 2:
-                    self.activations.append(self.shifted_sigmoid)
+                    self.activations.append(self.sigmoid)
                 else:
                     self.activations.append(self.leaky_relu)
                     
@@ -696,6 +786,11 @@ class RNN:
         Wih_vals = []
         Whh_vals = []
         bih_vals = []
+        
+        
+        neg_slope = 0.01
+        gain_leaky = np.sqrt(2.0 / (1.0 + neg_slope**2))  # around 1.414
+        target_rho = getattr(self, "spectral_radius", 0.95)
 
     
         for i in range(L):
@@ -703,18 +798,25 @@ class RNN:
 
             if i < L-1:
             # bound1 = 3*np.sqrt(6.0 / (fan_in + fan_out))
-                bound_low = np.sqrt(6.0 / fan_in)
-                bound_high = np.sqrt(6.0 / fan_out)
+                # bound_low = np.sqrt(6.0 / fan_in)
+                # bound_high = np.sqrt(6.0 / fan_out)
+                bound = np.sqrt(6.0 / fan_in) / gain_leaky
                 
-                Wih_v = 0.1*self.np_random.uniform(low=-bound_low, high=bound_high, size=(fan_out, fan_in)) #self.np_random.uniform(-bound1, bound1, size=(fan_out, fan_in))
+                Wih_v = self.np_random.uniform(low=-bound, high=bound, size=(fan_out, fan_in)) #self.np_random.uniform(-bound1, bound1, size=(fan_out, fan_in))
                 Wih_vals.append(Wih_v)
 
-                Whh_v = 0.1*self.np_random.uniform(low=-bound_low, high=bound_high, size=(fan_out, fan_out))
+                Whh_v = self.np_random.uniform(low=-bound, high=bound, size=(fan_out, fan_out))
+                # Whh_vals.append(Whh_v)
+
+                Whh_v = self._scale_to_spectral_radius(Whh_v, target=target_rho)
+                eigvals = np.linalg.eigvals(Whh_v)
+                rho = np.max(np.abs(eigvals)).real
+                print(f"max eigenvalue of Whh_{i}: {rho:.4f} (target: {target_rho})")
                 Whh_vals.append(Whh_v)
             
             else:
-                bound = np.sqrt(6.0 / (fan_out + fan_out))
-                Wih_v = 0.1*self.np_random.uniform(-bound, bound, size=(fan_out, fan_in))
+                bound = 0.1*np.sqrt(6.0 / (fan_out + fan_out))
+                Wih_v = self.np_random.uniform(-bound, bound, size=(fan_out, fan_in))
                 Wih_vals.append(Wih_v)
             
             bih_v = np.zeros((fan_out, 1))
@@ -862,7 +964,7 @@ class MPC:
     ns = NUM_STATES # num of states
     na = NUM_INPUTS # num of inputs
 
-    def __init__(self, layers_list, horizon, positions, radii, slack_penalty, mode_params):
+    def __init__(self, layers_list, horizon, positions, radii, slack_penalty, mode_params, modes):
         """
         Initialize the MPC class with parameters.
         
@@ -912,7 +1014,7 @@ class MPC:
         self.V_sym = cs.MX.sym("V0")
         
         # instantiate the RNN
-        self.rnn = RNN(layers_list, positions, radii, horizon, mode_params)
+        self.rnn = RNN(layers_list, positions, radii, horizon, mode_params, modes)
         self.m = self.rnn.obst.obstacle_num  # number of obstacles
         
         # predicted obstacle velocities over horizon
@@ -1471,7 +1573,8 @@ class RLclass:
         radii,
         modes,
         mode_params,
-        slack_penalty
+        slack_penalty_MPC,
+        slack_penalty_RL,
         ):
             # Store random seed for reproducibility
             self.seed = seed
@@ -1480,14 +1583,16 @@ class RLclass:
             self.env = env()
             
             # Penalty in RL stagecost on slacks
-            self.slack_penalty = slack_penalty
+            self.slack_penalty_MPC = slack_penalty_MPC
+            self.slack_penalty_RL = slack_penalty_RL
 
             # Initialize MPC and obstacle‐motion classes 
-            self.mpc = MPC(layers_list, horizon, positions, radii, self.slack_penalty, mode_params)
+            self.mpc = MPC(layers_list, horizon, positions, radii, self.slack_penalty_MPC, mode_params, modes)
             self.obst_motion = ObstacleMotion(positions, modes, mode_params)
             
             # layer list of input
             self.rnn_input_size = layers_list[0]
+            self.layers_list = layers_list
             # Parameters of experiments and states
             self.ns = self.mpc.ns
             self.na = self.mpc.na
@@ -1775,7 +1880,7 @@ class RLclass:
             step_size = learning_rate / bias_correction1
             bias_correction2_sqrt = np.sqrt(bias_correction2)
 
-            denom = np.sqrt(exp_avg_sq) / (bias_correction2_sqrt + eps)
+            denom = np.sqrt(exp_avg_sq) / bias_correction2_sqrt + eps
             
             dtheta = -step_size * (exp_avg / denom)
             return dtheta, exp_avg, exp_avg_sq
@@ -1783,11 +1888,8 @@ class RLclass:
         def update_learning_rate(self, current_stage_cost, params):
             """
             Update the learning rate based on the current stage cost metric.
-            
-            If the stage cost improves (goes down), reset patience and store the best params.
-            If it doesn’t improve for `patience_threshold` calls, decay the learning rate,
-            reset patience, and roll back to the best‐seen parameters.
             """
+
             if current_stage_cost < self.best_stage_cost:
                 self.best_params = params.copy() 
                 self.best_stage_cost = current_stage_cost
@@ -1804,7 +1906,7 @@ class RLclass:
 
             return params
 
-        def noise_scale_by_distance(self, x, y, max_radius=0.5):
+        def noise_scale_by_distance(self, x, y, max_radius=2): #maxradius was 0.5
             
             
             """
@@ -1865,6 +1967,54 @@ class RLclass:
                     tau = max(1.05 * tau, beta)
             print("Warning: Cholesky decomposition failed after maximum iterations; returning zero matrix.")
             return np.zeros((A.shape[0], A.shape[0]))
+        
+        def check_whh_spectral_radii(self, params_rnn_list):
+            """
+            Check and print the spectral radii of the recurrent weight matrices in the RNN.
+
+            Args:
+                params_rnn_list (_type_): _description_
+            """
+            
+            self.layers_list
+            
+            for i in range(len(self.layers_list)-1):
+                Whh = params_rnn_list[3*i + 2]  # recurrent weights
+                eigvals = np.linalg.eigvals(Whh)
+                rho = np.max(np.abs(eigvals)).real 
+                print(f"Hidden layer {i+1} recurrent weight matrix spectral radius: {rho:.4f}")
+                
+        def RNN_warmstart(self, x0, params):
+            """
+            Perform a forward pass through the RNN to obtain the initial hidden state.
+
+            Args:
+                x0 (ns,):  
+                    Initial state of the system.
+                params (dict):  
+                    Dictionary of system and RNN parameters.
+
+            Returns:
+                hidden_t0:  
+                    Initial hidden-state vectors for the RNN layers.
+            """
+            warmup_steps = 5  # number of warmup steps
+            # initial hidden states are zero
+            h0 = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
+                 for i in range(len(self.mpc.rnn.layers_list)-2)
+                 ]
+            for _ in range(warmup_steps):
+                x_t0 = np.array(x0).flatten()[:self.rnn_input_size]
+                # print(f"RNN warmstart raw:{x_t0}")
+                x_t0 = self.mpc.rnn.normalization_z(x_t0)
+                # print(f"RNN warmstart normalized:{self.mpc.rnn.normalization_z(x_t0)}")
+                params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])
+                # initial hidden states are zero
+                h0, _ = self.get_hidden_func(*h0, x_t0, *params_rnn)
+            
+            return h0
+            
+            
 
         def V_MPC(self, params, x, xpred_list, ypred_list, hidden_in):
             """
@@ -1932,6 +2082,9 @@ class RLclass:
             X = cs.reshape(solution["x"][:self.ns * (self.horizon+1)], self.ns, self.horizon + 1)
             flat_input = self.flat_input_fn(X, xpred_list, ypred_list)
             x_t0 = flat_input[:self.rnn_input_size]
+            # print(f"VMPC raw:{x_t0}")
+            x_t0 = self.mpc.rnn.normalization_z(x_t0)
+            # print(f"VMPC normalized:{self.mpc.rnn.normalization_z(x_t0)}")
             params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])
             *hidden_t1, alpha_list = self.get_hidden_func(*hidden_in, x_t0, *params_rnn) #alpha_list is list of outputs of NN
             
@@ -1947,7 +2100,7 @@ class RLclass:
         
         def V_MPC_rand(self, params, x, rand, xpred_list, ypred_list, hidden_in):
             """
-            Solve the value‐function MPC problem with injected randomness.
+            Solve the value-function MPC problem with injected randomness.
 
             This is identical to V_MPC, but includes a random noise term in the optimization
             to encourage exploration.
@@ -2010,6 +2163,9 @@ class RLclass:
             X = cs.reshape(solution["x"][:self.ns * (self.horizon+1)], self.ns, self.horizon + 1)
             flat_input = self.flat_input_fn(X, xpred_list, ypred_list)
             x_t0 = flat_input[:self.rnn_input_size]
+            # print(f"VMPCrand raw:{x_t0}")
+            x_t0=self.mpc.rnn.normalization_z(x_t0)
+            # print(f"VMPCrand normalized:{x_t0}")
             params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])  
             *hidden_t1, alpha_list = self.get_hidden_func(*hidden_in, x_t0, *params_rnn) #alpha_list is list of outputs of NN
             
@@ -2066,9 +2222,11 @@ class RLclass:
             U_upper_bound = np.ones(self.na * (self.horizon-1))
 
             #Assemble full lbx/ubx: [ x0; X(1…H); action; remaining U; slack ]
-            lbx = np.concatenate([np.asarray(x).flatten(), self.X_lower_bound, np.asarray(action).flatten(), U_lower_bound,  
+            lbx = np.concatenate([np.asarray(x).flatten(), self.X_lower_bound, 
+                                  np.asarray(action).flatten(), U_lower_bound,  
                                   np.zeros(self.mpc.rnn.obst.obstacle_num *self.horizon)])  
-            ubx = np.concatenate([np.asarray(x).flatten(), self.X_upper_bound, np.asarray(action).flatten(), U_upper_bound, 
+            ubx = np.concatenate([np.asarray(x).flatten(), self.X_upper_bound,
+                                  np.asarray(action).flatten(), U_upper_bound, 
                                   np.inf*np.ones(self.mpc.rnn.obst.obstacle_num *self.horizon)])
 
             lbg = np.concatenate([self.state_const_lbg, self.cbf_const_lbg])  
@@ -2103,6 +2261,7 @@ class RLclass:
             X = cs.reshape(solution["x"][:self.ns * (self.horizon+1)], self.ns, self.horizon + 1)
             flat_input = self.flat_input_fn(X, xpred_list, ypred_list)
             x_t0 = flat_input[:self.rnn_input_size]
+            x_t0 = self.mpc.rnn.normalization_z(x_t0)
             params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])  
             *hidden_t1, _ = self.get_hidden_func(*hidden_in, x_t0, *params_rnn) 
             
@@ -2139,7 +2298,7 @@ class RLclass:
             
             return (
                 state.T @ Qstage @ state
-                + action.T @ Rstage @ action + np.sum(self.slack_penalty *S) + np.sum(5e5*violations)
+                + action.T @ Rstage @ action + self.slack_penalty_RL*(np.sum(S)/(self.horizon+self.mpc.rnn.obst.obstacle_num)) + np.sum(2e5*violations)
             )
         
         def evaluation_step(self, params, experiment_folder, episode_duration):
@@ -2180,7 +2339,10 @@ class RLclass:
             self.lam_g_prev_VMPC    = cs.DM()  
 
             for i in range(episode_duration):
-                action, _, hidden_in_VMPC, alpha = self.V_MPC(params=params, x=state, xpred_list=xpred_list, ypred_list=ypred_list, hidden_in=hidden_in_VMPC)
+                action, _, hidden_in_VMPC, alpha = self.V_MPC(params=params, x=state, 
+                                                              xpred_list=xpred_list, 
+                                                              ypred_list=ypred_list, 
+                                                              hidden_in=hidden_in_VMPC)
 
                 statsv = self.solver_inst.stats()
                 if statsv["success"] == False:
@@ -2394,6 +2556,9 @@ class RLclass:
             params["P"] = P_posdef
             params["rnn_params"] = theta_vector_num[P_diag_shape:]       
             # params["rnn_params"] = theta_vector_num  
+            
+            params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])
+            # self.check_whh_spectral_radii(params_rnn)
 
             return params
         
@@ -2462,6 +2627,9 @@ class RLclass:
             
             for i in range(1,episode_duration*num_episodes):  
                 
+                # if i == 36*50*150:
+                #     self.alpha = self.alpha*0.01
+                
                 noise = self.noise_scalingfactor*self.noise_scale_by_distance(x[0],x[1])
                 rand = noise * self.np_random.normal(loc=0, scale=self.noise_variance, size = (2,1))
 
@@ -2478,9 +2646,12 @@ class RLclass:
                     self.error_happened = True
 
      
-                solution, Qcost, lagrange_mult_g, lam_lbx, lam_ubx, _, hidden_in_QMPC = self.Q_MPC(params=params, action=u, x=x, 
-                                                                                   xpred_list=xpred_list, ypred_list=ypred_list,
-                                                                                   hidden_in=hidden_in_QMPC)
+                solution, Qcost, lagrange_mult_g, lam_lbx, lam_ubx, _, hidden_in_QMPC = self.Q_MPC(params=params, 
+                                                                                                   action=u, 
+                                                                                                   x=x, 
+                                                                                                   xpred_list=xpred_list,
+                                                                                                   ypred_list=ypred_list,
+                                                                                                hidden_in=hidden_in_QMPC)
      
 
                 statsq = self.solver_inst.stats()
@@ -2496,7 +2667,8 @@ class RLclass:
 
                 # append trajectory points for plotting
                 states.append(x)
-                hx = [ float(hf(cs.DM(x), xpred_list[0:self.mpc.rnn.obst.obstacle_num], ypred_list[0:self.mpc.rnn.obst.obstacle_num])) 
+                hx = [ float(hf(cs.DM(x), xpred_list[0:self.mpc.rnn.obst.obstacle_num], 
+                                ypred_list[0:self.mpc.rnn.obst.obstacle_num])) 
                              for hf in self.h_func_list ]
                 hx_list.append(hx)
                 #calculate V value
@@ -2504,7 +2676,11 @@ class RLclass:
                 # print(f"x_2: {x}")
                 # print(f"params_3: {params}")
 
-                _, Vcost, hidden_in_VMPC, _ = self.V_MPC(params=params, x=x, xpred_list=xpred_list, ypred_list=ypred_list, hidden_in=hidden_in_VMPC)
+                _, Vcost, hidden_in_VMPC, _ = self.V_MPC(params=params, 
+                                                         x=x, 
+                                                         xpred_list=xpred_list, 
+                                                         ypred_list=ypred_list, 
+                                                         hidden_in=hidden_in_VMPC)
 
                 statsv = self.solver_inst.stats()
                 if statsv["success"] == False:
@@ -2521,13 +2697,16 @@ class RLclass:
                 params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])     
                 phi = self.phi_func(X, 
                                     U,
-                                    cs.DM(xpred_list), cs.DM(ypred_list), *hidden_in_QMPC, *params_rnn)
+                                    cs.DM(xpred_list), 
+                                    cs.DM(ypred_list), 
+                                    *hidden_in_QMPC, 
+                                    *params_rnn)
 
                 phi_list.append(np.array(phi).reshape(self.horizon, self.mpc.m))
                 
-                S_list.append(S)
-                S_list_VMPC.append(self.S_VMPC_rand)
-                lag_g_list.append(lagrange_mult_g[-S.size1():])
+                # S_list.append(S)
+                # S_list_VMPC.append(self.S_VMPC_rand)
+                # lag_g_list.append(lagrange_mult_g[-S.size1():])
             
                 qlagrange_numeric_jacob=  self.qlagrange_fn_jacob(
                     params["A"],
@@ -2560,10 +2739,10 @@ class RLclass:
                     self.error_happened = False
                     
                 _ = self.obst_motion.step()
+                
+                obs_positions.append(self.obst_motion.current_positions())
         
                 xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
-
-                obs_positions.append(self.obst_motion.current_positions())
                 
                 if (k == episode_duration):                     
                     # -1 because loop starts from 1
@@ -2572,14 +2751,15 @@ class RLclass:
                         # self.evaluation_step(S=S, params=params, experiment_folder=experiment_folder, episode_duration=episode_duration)
                         
                         print (f"updatedddddd")
-                        # B_update_avg = np.mean(B_update_buffer, 0)
+                        B_update_avg = np.mean(B_update_buffer, 0)
                         
-                        buf = np.asarray(B_update_buffer)            # [N, d]
-                        batch = int(0.3*len(buf))          # pick a size you like
+                        # sampling from the buffer to get a batch average
+                        # buf = np.asarray(B_update_buffer)            # [N, d]
+                        # batch = int(0.3*len(buf))          # pick number you want 
 
-                        # Uniform replay (simple & stable):
-                        idx = self.np_random.choice(len(buf), size=batch, replace=False)
-                        B_update_avg = buf[idx].mean(axis=0)
+                        # # Uniform replay (simple & stable):
+                        # idx = self.np_random.choice(len(buf), size=batch, replace=False)
+                        # B_update_avg = buf[idx].mean(axis=0)
                         
                         B_update_history.append(B_update_avg)
 
@@ -2631,7 +2811,7 @@ class RLclass:
                         plt.axis("equal")
                         plt.grid()
                         self.save_figures([(figstate,
-                            f"position_plotat_{i}")],
+                            f"position_plotat_{i}.svg")],
                             experiment_folder, "Learning")
 
 
@@ -2645,7 +2825,7 @@ class RLclass:
                         plt.grid()
                         plt.tight_layout()
                         self.save_figures([(figvelocity,
-                            f"figvelocity{i}")],
+                            f"figvelocity{i}.svg")],
                             experiment_folder, "Learning")
 
                         # Plot TD
@@ -2659,7 +2839,7 @@ class RLclass:
                         plt.legend()
                         plt.grid(True)
                         self.save_figures([(figtdtemp,
-                            f"TD_plotat_{i}")],
+                            f"TD_plotat_{i}.svg")],
                             experiment_folder, "Learning")
 
                         figactions=plt.figure()
@@ -2672,7 +2852,7 @@ class RLclass:
                         plt.grid()
                         plt.tight_layout()
                         self.save_figures([(figactions,
-                            f"action_plotat_{i}")],
+                            f"action_plotat_{i}.svg")],
                             experiment_folder, "Learning")
 
                         gradst = np.asarray(grad_temp)
@@ -2695,7 +2875,7 @@ class RLclass:
                         plt.grid(True)
                         plt.tight_layout()
                         self.save_figures([(P_figgrad,
-                            f"P_grad_plotat_{i}")],
+                            f"P_grad_plotat_{i}.svg")],
                             experiment_folder, "Learning")
 
 
@@ -2710,7 +2890,7 @@ class RLclass:
                         plt.grid(True)
                         plt.tight_layout()
                         self.save_figures([(NN_figgrad,
-                            f"NN_grad_plotat_{i}")],
+                            f"RNN_grad_plotat_{i}.svg")],
                             experiment_folder, "Learning")
                         # plt.show()
                         

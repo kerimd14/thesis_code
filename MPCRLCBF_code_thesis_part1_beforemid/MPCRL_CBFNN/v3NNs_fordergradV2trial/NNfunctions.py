@@ -352,29 +352,29 @@ def run_simulation(params, env, experiment_folder, episode_duration, layers_list
     
     if after_updates == False:
         figs = [
-                    (figstates, "states_MPCregular_beforeupdates"),
-                    (figactions, "actions_MPCregular_beforeupdates"),
-                    (figstagecost, "stagecost_MPCregular_beforeupdates"),
-                    (figsalpha, "alpha_MPCregular_beforeupdates"),
-                    (figsvelocity, "velocity_MPCregular_beforeupdates"),
-                    (figshx, "hx_MPCregular_beforeupdates"),
-                    (figshxmarg, "marghx_MPCregular_beforeupdates")
+                    (figstates, "states_MPCregular_beforeupdates.svg"),
+                    (figactions, "actions_MPCregular_beforeupdates.svg"),
+                    (figstagecost, "stagecost_MPCregular_beforeupdates.svg"),
+                    (figsalpha, "alpha_MPCregular_beforeupdates.svg"),
+                    (figsvelocity, "velocity_MPCregular_beforeupdates.svg"),
+                    (figshx, "hx_MPCregular_beforeupdates.svg"),
+                    (figshxmarg, "marghx_MPCregular_beforeupdates.svg")
                 ]
     else:
          figs = [
-                    (figstates, "states_MPCregular_afterupdates"),
-                    (figactions, "actions_MPCregular_afterupdates"),
-                    (figstagecost, "stagecost_MPCregular_afterupdates"),
-                    (figsalpha, "alpha_MPCregular_afterupdates"),
-                    (figsvelocity, "velocity_MPCregular_afterupdates"),
-                    (figshx, "hx_MPCregular_afterupdates"),
-                    (figshxmarg, "marghx_MPCregular_afterupdates")
+                    (figstates, "states_MPCregular_afterupdates.svg"),
+                    (figactions, "actions_MPCregular_afterupdates.svg"),
+                    (figstagecost, "stagecost_MPCregular_afterupdates.svg"),
+                    (figsalpha, "alpha_MPCregular_afterupdates.svg"),
+                    (figsvelocity, "velocity_MPCregular_afterupdates.svg"),
+                    (figshx, "hx_MPCregular_afterupdates.svg"),
+                    (figshxmarg, "marghx_MPCregular_afterupdates.svg")
                 ]
 
-    figs.append((fig8, f"states_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
-    figs.append((fig9, f"omega_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
-    figs.append((fig10, f"hx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
-    figs.append((fig11, f"marghx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
+    figs.append((fig8, f"states_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
+    figs.append((fig9, f"omega_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
+    figs.append((fig10, f"hx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
+    figs.append((fig11, f"marghx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
     
     
     save_figures(figs,  experiment_folder)
@@ -561,11 +561,11 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, l
     #plt.show()
 
     figs = [
-                (figstates, "states_MPCnoise"),
-                (figactions, "actions_MPCnoise"),
-                (figstagecost, "stagecost_MPCrandom"),
-                (figsalpha, "alpha_MPCnoise"),
-                (figsvelocity, "velocity_MPCnoise")
+                (figstates, "states_MPCnoise.svg"),
+                (figactions, "actions_MPCnoise.svg"),
+                (figstagecost, "stagecost_MPCrandom.svg"),
+                (figsalpha, "alpha_MPCnoise.svg"),
+                (figsvelocity, "velocity_MPCnoise.svg")
             ]
 
     save_figures(figs,  experiment_folder)
