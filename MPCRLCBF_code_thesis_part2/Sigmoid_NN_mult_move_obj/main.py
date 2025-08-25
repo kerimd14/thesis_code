@@ -63,7 +63,7 @@ def main():
     replay_buffer_size = episode_duration * episode_update_freq  # buffer holding number of episodes (e.g. hold 10 episodes)
     
     #name of folder where the experiment is saved
-    experiment_folder = "NN_mult_move_obj_experiment_62"
+    experiment_folder = "NN_mult_move_obj_experiment_63"
     
     #check if file exists already, if yes raise an exception
     # if os.path.exists(experiment_folder):

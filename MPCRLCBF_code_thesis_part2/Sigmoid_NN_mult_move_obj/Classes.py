@@ -1383,7 +1383,7 @@ class RLclass:
                 # system
                 xk, yk = system_xy[k]
                 line.set_data(system_xy[:k+1, 0], system_xy[:k+1, 1])
-                dot.set_data(xk, yk)
+                dot.set_data([xk], [yk])
                 # obstacles
                 for i, c in enumerate(circles):
                     cx, cy = obs_positions[k, i]
