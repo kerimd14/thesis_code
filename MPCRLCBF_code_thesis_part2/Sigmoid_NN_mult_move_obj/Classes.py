@@ -1450,7 +1450,7 @@ class RLclass:
             step_size = learning_rate / bias_correction1
             bias_correction2_sqrt = np.sqrt(bias_correction2)
 
-            denom = np.sqrt(exp_avg_sq) / (bias_correction2_sqrt + eps)
+            denom = np.sqrt(exp_avg_sq) / bias_correction2_sqrt + eps
             
             dtheta = -step_size * (exp_avg / denom)
             return dtheta, exp_avg, exp_avg_sq
