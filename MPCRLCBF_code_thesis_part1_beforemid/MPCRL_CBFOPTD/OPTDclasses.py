@@ -405,7 +405,7 @@ class MPC:
         # construct lower bound here 
         lagrange1 = lagrange_mult_x_lb_sym.T @ (opt_solution - lbx) #positive @ negative
         lagrange2 = lagrange_mult_x_ub_sym.T @ (ubx - opt_solution)  # positive @ negative                                
-        lagrange3 = lagrange_mult_g_sym.T @ cs.vertcat(self.state_const_list, self.cbf_const_list) # opposite signs
+        lagrange3 = lagrange_mult_g_sym.T @ cs.vertcat(self.state_const_list, -self.cbf_const_list) # opposite signs
 
  
         theta_vector = cs.vertcat(self.V_sym, self.P_diag, self.Pw_sym, self.omega0_sym)
@@ -778,11 +778,11 @@ class RLclass:
             A_update_chom = L @ L.T
 
             # alpha_vec is resposible for the updates
-            alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]-4), self.alpha, self.alpha, self.alpha, self.alpha*1e-3)
+            alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]-4), self.alpha, self.alpha, self.alpha, self.alpha)
             # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]-2), self.alpha,self.alpha*1e-3)
 
             # uncostrained update to compare to the qp update
-            y = np.linalg.solve(A_update_chom, B_update_avg)
+            y = np.linalg.solve(A_update_chom, -B_update_avg)
             theta_vector_num_toprint = theta_vector_num - (alpha_vec * y)#self.alpha * y
             print(f"theta_vector_num no qp: {theta_vector_num_toprint}")
 
@@ -819,16 +819,16 @@ class RLclass:
                 idx = np.abs(eigvecs[:, i]).argmax()
                 dominant.append(param_names[idx])
 
-            # Make the bar plot, labeling each bar by its dominant parameter
-            plt.figure(figsize=(8,4))
-            bars = plt.bar(np.arange(len(eigvals)), eigvals, tick_label=dominant)
-            plt.yscale('log')
-            plt.xlabel('Dominant parameter in eigen‑direction')
-            plt.ylabel('Eigenvalue (log scale)')
-            plt.title('Hessian eigenvalues ⟂ dominant θ‑coordinate')
-            plt.xticks(rotation=45, ha='right')
-            plt.tight_layout()
-            plt.show()
+            # # Make the bar plot, labeling each bar by its dominant parameter
+            # plt.figure(figsize=(8,4))
+            # bars = plt.bar(np.arange(len(eigvals)), eigvals, tick_label=dominant)
+            # plt.yscale('log')
+            # plt.xlabel('Dominant parameter in eigen‑direction')
+            # plt.ylabel('Eigenvalue (log scale)')
+            # plt.title('Hessian eigenvalues ⟂ dominant θ‑coordinate')
+            # plt.xticks(rotation=45, ha='right')
+            # plt.tight_layout()
+            # plt.show()
 
 
             # pick out the index of the largest eigenvalue
@@ -844,7 +844,7 @@ class RLclass:
 
             # constrained update qp update
             solution = self.qp_solver(
-                    p=cs.vertcat(theta_vector_num, A_update_chom.flatten(), B_update_avg, alpha_vec),
+                    p=cs.vertcat(theta_vector_num, A_update_chom.flatten(), -B_update_avg, alpha_vec),
                     lbg=cs.vertcat(np.zeros(theta_vector_num.shape[0]-1), np.array([1e-6])),
                     ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0]-1), np.array([1])),
                 )
@@ -1021,7 +1021,7 @@ class RLclass:
                 outer_product = qlagrange_numeric_jacob @ qlagrange_numeric_jacob.T
 
                 # second order update
-                B_update = -TD*qlagrange_numeric_jacob
+                B_update = TD*qlagrange_numeric_jacob
                 B_update_buffer.append(B_update)
 
                 if qlagrange_numeric_hess.nnz() > 0:
@@ -1078,16 +1078,16 @@ class RLclass:
                         idx = np.abs(eigvecs[:, i]).argmax()
                         dominant.append(param_names[idx])
 
-                    # Make the bar plot, labeling each bar by its dominant parameter
-                    plt.figure(figsize=(8,4))
-                    bars = plt.bar(np.arange(len(eigvals)), eigvals, tick_label=dominant)
-                    plt.yscale('log')
-                    plt.xlabel('Dominant parameter in eigen‑direction')
-                    plt.ylabel('Eigenvalue (log scale)')
-                    plt.title('Hessian eigenvalues ⟂ dominant θ‑coordinate')
-                    plt.xticks(rotation=45, ha='right')
-                    plt.tight_layout()
-                    plt.show()
+                    # # Make the bar plot, labeling each bar by its dominant parameter
+                    # plt.figure(figsize=(8,4))
+                    # bars = plt.bar(np.arange(len(eigvals)), eigvals, tick_label=dominant)
+                    # plt.yscale('log')
+                    # plt.xlabel('Dominant parameter in eigen‑direction')
+                    # plt.ylabel('Eigenvalue (log scale)')
+                    # plt.title('Hessian eigenvalues ⟂ dominant θ‑coordinate')
+                    # plt.xticks(rotation=45, ha='right')
+                    # plt.tight_layout()
+                    # plt.show()
                     
                     x_1_mean.append(np.mean(states, axis= 1)[0])
                     x_2_mean.append(np.mean(states, axis= 1)[1])

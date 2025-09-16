@@ -37,28 +37,32 @@ def main():
     noise_variance = 5
     decay_at_end = 0.01
     
-    num_episodes = 6000
-    episode_update_freq = 5  # frequency of updates (e.g. update every 10 episodes)
+    num_episodes = 3000
+    episode_update_freq = 3  # frequency of updates (e.g. update every 10 episodes)
     decay_rate = 1 - np.power(decay_at_end, 1 / (num_episodes / episode_update_freq))
     print(f"Computed noise decay_rate: {decay_rate:.4f}")
 
     # RL hyper-parameters
-    alpha = 7e-3       # initial learning rate
+    alpha = 7e-3      # initial learning rate
     gamma = 0.95       # discount factor
-    slack_penalty_MPC = 2e7  # penalty on slack variables in CBF constraints for the MPC stage cost
-    slack_penalty_RL = 5e4 # penalty on slack variables in CBF constraints for RL stage cost
+    slack_penalty_MPC_L1 = 2e7  # penalty on slack variables in CBF constraints for the MPC stage cost
+    slack_penalty_MPC_L2 = 0#1e3
+    slack_penalty_RL_L1 = 3e4 # penalty on slack variables in CBF constraints for RL stage cost
+    slack_penalty_RL_L2 = 0#1e3 # penalty on slack variables in CBF constraints for RL stage cost
+    violation_penalty = 0#4e5  # penalty on constraint violation (used in stage cost function)
     # Learning rate scheduler
     # patience = number of epochs with no improvement after which learning rate will be reduced
-    patience = 10_000 
+    patience = 5
     lr_decay = 0.1     # factor to shrink the learning rate with after patience is reached
 
     # Episode / MPC specs
     episode_duration = 150
-    mpc_horizon = 5
+    mpc_horizon = 6
     replay_buffer_size = episode_duration * episode_update_freq  # buffer holding number of episodes (e.g. hold 10 episodes)
     
+    
     #name of folder where the experiment is saved
-    experiment_folder = "RNN_mult_move_obj_experiment_166"
+    experiment_folder = "RNN_mult_move_obj_experiment_318"
     
     #check if file exists already, if yes raise an exception
     # if os.path.exists(experiment_folder):
@@ -98,7 +102,7 @@ def main():
     radii     = [0.7, 0.7, 1]
     modes     = ["step_bounce", "step_bounce", "static"]
     mode_params = [
-    {"bounds": (-4.0,  0.0), "speed": 2.3, "dir":  1},
+    {"bounds": (-4.0,  0), "speed": 2.3, "dir":  1},
     {"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
     {"bounds": (-2.0,  -2.0), "speed": 0.0},
 ]
@@ -106,7 +110,7 @@ def main():
     # ─── Build & initialize RNN CBF ───────────────────────────────────────────
 
     input_dim = NUM_STATES + len(positions) + 2*len(positions) #x+h(x)+ (obs_positions_x + obs_positions_y)
-    hidden_dims = [16, 16]
+    hidden_dims = [16, 16, 16]
     output_dim = len(positions)
     layers_list = [input_dim] + hidden_dims + [output_dim]
     print("RNN layers:", layers_list)
@@ -123,21 +127,22 @@ def main():
     
     # run simulation of random MPC to see how the system behaves under initial random noise
     
-    run_simulation_randomMPC(
-        params_init,
-        env,
-        experiment_folder,
-        episode_duration,
-        layers_list,
-        initial_noise_scale,
-        noise_variance,
-        mpc_horizon,
-        positions,
-        radii,
-        modes,
-        copy.deepcopy(mode_params),
-        slack_penalty_MPC,
-    )
+    # run_simulation_randomMPC(
+    #     params_init,
+    #     env,
+    #     experiment_folder,
+    #     episode_duration,
+    #     layers_list,
+    #     initial_noise_scale,
+    #     noise_variance,
+    #     mpc_horizon,
+    #     positions,
+    #     radii,
+    #     modes,
+    #     copy.deepcopy(mode_params),
+    #     slack_penalty_MPC_L1, 
+    #     slack_penalty_MPC_L2,
+    # )
     
     # run simulation to get the initial policy before training
     stage_cost_before = run_simulation(
@@ -152,7 +157,8 @@ def main():
         radii=radii,
         modes=modes,
         mode_params=copy.deepcopy(mode_params),
-        slack_penalty_eval=slack_penalty_MPC,
+        slack_penalty_MPC_L1=slack_penalty_MPC_L1,
+        slack_penalty_MPC_L2=slack_penalty_MPC_L2,
     )
     
     # use RL to train the RNN CBF with MPC
@@ -173,8 +179,11 @@ def main():
         radii,
         modes,
         copy.deepcopy(mode_params),
-        slack_penalty_MPC,
-        slack_penalty_RL,
+        slack_penalty_MPC_L1,
+        slack_penalty_MPC_L2,
+        slack_penalty_RL_L1,
+        slack_penalty_RL_L2,
+        violation_penalty
     )
     trained_params = rl_agent.rl_trainingloop(
         episode_duration=episode_duration,
@@ -198,7 +207,8 @@ def main():
         radii=radii,
         modes=modes,
         mode_params=copy.deepcopy(mode_params),
-        slack_penalty_eval=slack_penalty_MPC,
+        slack_penalty_MPC_L1=slack_penalty_MPC_L1,
+        slack_penalty_MPC_L2=slack_penalty_MPC_L2,
     )
     
     #save experiment configuration and results
@@ -228,8 +238,11 @@ def main():
         copy.deepcopy(mode_params),
         positions,
         radii,
-        slack_penalty_MPC,
-        slack_penalty_RL
+        slack_penalty_MPC_L1,
+        slack_penalty_MPC_L2,
+        slack_penalty_RL_L1,
+        slack_penalty_RL_L2,
+        violation_penalty
     )
 
     # append final stage-cost to folder name

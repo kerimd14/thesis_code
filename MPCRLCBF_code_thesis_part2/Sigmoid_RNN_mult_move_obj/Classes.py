@@ -12,6 +12,8 @@ from control import dlqr
 from collections import deque
 import pandas as pd
 import matplotlib.animation as animation
+import matplotlib.colors as mcolors
+from matplotlib.collections import LineCollection
 
 from config import SAMPLING_TIME, NUM_INPUTS, NUM_STATES, CONSTRAINTS_X, SEED, CONSTRAINTS_U
 
@@ -815,7 +817,7 @@ class RNN:
                 Whh_vals.append(Whh_v)
             
             else:
-                bound = 0.1*np.sqrt(6.0 / (fan_out + fan_out))
+                bound = 0.01*np.sqrt(6.0 / (fan_in + fan_out))
                 Wih_v = self.np_random.uniform(-bound, bound, size=(fan_out, fan_in))
                 Wih_vals.append(Wih_v)
             
@@ -964,7 +966,7 @@ class MPC:
     ns = NUM_STATES # num of states
     na = NUM_INPUTS # num of inputs
 
-    def __init__(self, layers_list, horizon, positions, radii, slack_penalty, mode_params, modes):
+    def __init__(self, layers_list, horizon, positions, radii, slack_penalty_MPC_L1, slack_penalty_MPC_L2, mode_params, modes):
         """
         Initialize the MPC class with parameters.
         
@@ -1008,10 +1010,18 @@ class MPC:
 
         self.P_diag = cs.MX.sym("P_diag", self.ns, 1)
         self.P_sym = cs.diag(self.P_diag)
-
-        self.Q_sym = cs.MX.sym("Q", self.ns, self.ns)
-        self.R_sym = cs.MX.sym("R", self.na, self.na)
+        
+        # self.Q_sym = cs.MX.sym("Q", self.ns, self.ns)
+        # self.R_sym = cs.MX.sym("R", self.na, self.na)
         self.V_sym = cs.MX.sym("V0")
+        
+        self.Q_diag = cs.MX.sym("Q_diag", self.ns, 1)
+        self.R_diag = cs.MX.sym("R_diag", self.na, 1)
+        self.Q_sym = cs.diag(self.Q_diag)
+        self.R_sym = cs.diag(self.R_diag)
+        
+        
+        # self.Q_ = cs.diag(self.P_diag)
         
         # instantiate the RNN
         self.rnn = RNN(layers_list, positions, radii, horizon, mode_params, modes)
@@ -1026,8 +1036,9 @@ class MPC:
         self.ypred_hor = cs.MX.sym("ypred_hor", self.m * (self.horizon+1))
         
         # weight on slack variables in CBF constraints
-        self.weight_cbf = cs.DM([slack_penalty])
-
+        # self.weight_cbf = cs.DM([slack_penalty])
+        self.slack_penalty_MPC_L1 = slack_penalty_MPC_L1
+        self.slack_penalty_MPC_L2 = slack_penalty_MPC_L2
 
         # decision variables:
         #   X_sym: states over horizon+1
@@ -1207,13 +1218,20 @@ class MPC:
         )
 
         # CBF slack (or violation) over objects and time
-        cbf_cost = self.weight_cbf * sum(
+        cbf_cost_L1 = self.slack_penalty_MPC_L1 * sum(
         self.S_sym[m, k]
         for m in range(self.m)
         for k in range(self.horizon)
         )
         
-        stage_cost = quad_cost + cbf_cost
+        cbf_cost_L2 = cs.DM(0.5)*self.slack_penalty_MPC_L2 * sum(
+        self.S_sym[m, k]**2
+        for m in range(self.m)
+        for k in range(self.horizon)
+        )
+        
+        
+        stage_cost = quad_cost + cbf_cost_L1 + cbf_cost_L2
         
         print(f"Stage cost current: {stage_cost}")
 
@@ -1263,8 +1281,10 @@ class MPC:
 
         nlp = {
             "x": cs.vertcat(X_flat, U_flat),
-            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, 
-                            R_sym_flat, self.rnn.get_flat_parameters(), self.xpred_hor, self.ypred_hor, *self.hid_syms),
+            # "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, 
+            #                 R_sym_flat, self.rnn.get_flat_parameters(), self.xpred_hor, self.ypred_hor, *self.hid_syms),
+            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, self.Q_diag, 
+                            self.R_diag, self.rnn.get_flat_parameters(), self.xpred_hor, self.ypred_hor, *self.hid_syms),
             "f": self.objective_noslack, 
             "g": cs.vertcat(self.state_const_list, -self.cbf_const_list_noslack),
         }
@@ -1313,8 +1333,10 @@ class MPC:
 
         nlp = {
             "x": cs.vertcat(X_flat, U_flat, S_flat),
-            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, 
-                            R_sym_flat, self.rnn.get_flat_parameters(), self.xpred_hor, self.ypred_hor, *self.hid_syms),
+            # "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, 
+            #                 R_sym_flat, self.rnn.get_flat_parameters(), self.xpred_hor, self.ypred_hor, *self.hid_syms),
+                        "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym,self.P_diag, self.Q_diag, 
+                            self.R_diag, self.rnn.get_flat_parameters(), self.xpred_hor, self.ypred_hor, *self.hid_syms),
             "f": self.objective, 
             "g": cs.vertcat(self.state_const_list, -self.cbf_const_list),
         }
@@ -1367,8 +1389,10 @@ class MPC:
 
         nlp = {
             "x": cs.vertcat(X_flat, U_flat, S_flat),
-            "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, R_sym_flat, 
-                            self.rnn.get_flat_parameters(), rand_noise, self.xpred_hor, self.ypred_hor, *self.hid_syms),
+            # "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym, self.P_diag, Q_sym_flat, R_sym_flat, 
+            #                 self.rnn.get_flat_parameters(), rand_noise, self.xpred_hor, self.ypred_hor, *self.hid_syms),
+                        "p": cs.vertcat(A_sym_flat, B_sym_flat, self.b_sym, self.V_sym,self.P_diag, self.Q_diag, 
+                            self.R_diag, self.rnn.get_flat_parameters(), rand_noise, self.xpred_hor, self.ypred_hor, *self.hid_syms),
             "f": self.objective + rand_noise.T @ self.U_sym[:,0], 
             "g": cs.vertcat(self.state_const_list, -self.cbf_const_list),
         }
@@ -1443,8 +1467,9 @@ class MPC:
         # if self.cbf_const_list didnt have a minus infront it would be g(x)>=0, but the according lagrangians wouldnt hold
         
  
-        theta_vector = cs.vertcat(self.P_diag, self.rnn.get_flat_parameters())
-        # theta_vector = cs.vertcat(self.rnn.get_flat_parameters())
+        # theta_vector = cs.vertcat(self.P_diag, self.rnn.get_flat_parameters())
+        # theta_vector = cs.vertcat(self.P_diag, self.Q_diag, self.R_diag, self.rnn.get_flat_parameters())
+        theta_vector = cs.vertcat(self.rnn.get_flat_parameters())
 
         self.theta = theta_vector
 
@@ -1489,8 +1514,8 @@ class MPC:
         qp = {
             "x": cs.vertcat(delta_theta),
             "p": cs.vertcat(theta, p_gradient_sym),
-            "f": 0.5*delta_theta.T @ Hessian.reshape((self.theta.shape[0], self.theta.shape[0])) @ delta_theta +  
-                p_gradient_sym.T @ (delta_theta) + lambda_reg/2 * delta_theta.T @ delta_theta, 
+            "f": 0.5*delta_theta.T @ Hessian @ delta_theta +  
+                p_gradient_sym.T @ (delta_theta), #+ lambda_reg/2 * delta_theta.T @ delta_theta, 
             "g": theta + delta_theta,
         }
 
@@ -1573,8 +1598,11 @@ class RLclass:
         radii,
         modes,
         mode_params,
-        slack_penalty_MPC,
-        slack_penalty_RL,
+        slack_penalty_MPC_L1, 
+        slack_penalty_MPC_L2,
+        slack_penalty_RL_L1,
+        slack_penalty_RL_L2,
+        violation_penalty,
         ):
             # Store random seed for reproducibility
             self.seed = seed
@@ -1583,11 +1611,15 @@ class RLclass:
             self.env = env()
             
             # Penalty in RL stagecost on slacks
-            self.slack_penalty_MPC = slack_penalty_MPC
-            self.slack_penalty_RL = slack_penalty_RL
+            self.slack_penalty_MPC_L1 = slack_penalty_MPC_L1
+            self.slack_penalty_MPC_L2 = slack_penalty_MPC_L2,
+            self.slack_penalty_RL_L1 = slack_penalty_RL_L1
+            self.slack_penalty_RL_L2 = slack_penalty_RL_L2
+            
+            self.violation_penalty = violation_penalty
 
             # Initialize MPC and obstacle‐motion classes 
-            self.mpc = MPC(layers_list, horizon, positions, radii, self.slack_penalty_MPC, mode_params, modes)
+            self.mpc = MPC(layers_list, horizon, positions, radii, self.slack_penalty_MPC_L1, self.slack_penalty_MPC_L2, mode_params, modes)
             self.obst_motion = ObstacleMotion(positions, modes, mode_params)
             
             # layer list of input
@@ -1647,8 +1679,9 @@ class RLclass:
             
             # ADAM
             # theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), self.params_innit["rnn_params"])
-            theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), self.params_innit["rnn_params"])
-            # theta_vector_num = cs.vertcat(self.params_innit["rnn_params"])
+            # theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), self.params_innit["rnn_params"])
+            # theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), cs.diag(self.params_innit["Q"]),  cs.diag(self.params_innit["R"]),  self.params_innit["rnn_params"])
+            theta_vector_num = cs.vertcat(self.params_innit["rnn_params"])
             self.exp_avg = np.zeros(theta_vector_num.shape[0])
             self.exp_avg_sq = np.zeros(theta_vector_num.shape[0])
             self.adam_iter = 1
@@ -1680,6 +1713,7 @@ class RLclass:
             # construct list to extract h(x_{k},k)
             self.h_func_list = self.mpc.rnn.obst.make_h_functions()
             
+            self.spectral_radii_hist = []            
             print(f"initialization done")
             
             
@@ -1741,8 +1775,8 @@ class RLclass:
             ax.set_title(r"System + Moving Obstacles")
             # Set fixed window of gif based on constraints_x
             span = constraints_x
-            ax.set_xlim(-1.1*span, +0.1*span)
-            ax.set_ylim(-1.1*span, +0.1*span)
+            ax.set_xlim(-1.1*span, +0.5*span)
+            ax.set_ylim(-1.1*span, +0.5*span)
 
             # Prepare the system path (line) and current position (dot)
             line, = ax.plot([], [], "o-", lw=2, label=r"system path")
@@ -1797,6 +1831,568 @@ class RLclass:
             )
             ani.save(out_path, writer="pillow", fps=3, dpi=90)
             plt.close(fig)
+            
+
+        # def make_system_obstacle_animation_v2(self,
+        #     states_eval: np.ndarray,      # (T,4) or (T,2)
+        #     pred_paths: np.ndarray,       # (T, N+1, 2), ph[0] = current x_k
+        #     obs_positions: np.ndarray,    # (T, m, 2)
+        #     radii: list,                  # (m,)
+        #     constraints_x: float,         # plotting window span
+        #     out_path: str,                # gif path
+        #     trail_len: int = None,        # if None → use N
+        #     fps: int = 12,
+        #     interval_ms: int = 150,
+        #     system_color: str = "C0",
+        #     pred_color: str = "pink",
+        # ):
+        #     T, m = obs_positions.shape[:2]
+        #     system_xy = states_eval[:, :2]
+
+        #     Np1 = pred_paths.shape[1]
+        #     N   = Np1 - 1
+        #     if trail_len is None:
+        #         trail_len = N
+
+        #     sys_rgb  = mcolors.to_rgb(system_color)
+        #     pred_rgb = mcolors.to_rgb(pred_color)
+
+        #     fig, ax = plt.subplots()
+        #     ax.set_aspect("equal", "box")
+        #     ax.grid(True)
+        #     ax.set_xlabel(r"$x$")
+        #     ax.set_ylabel(r"$y$")
+        #     ax.set_title(r"System + Moving Obstacles + Horizon")
+        #     span = constraints_x
+        #     ax.set_xlim(-1.1*span, +0.5*span)
+        #     ax.set_ylim(-1.1*span, +0.5*span)
+
+        #     # --- Artists ---
+        #     # Trail: line + fading dots (dots exclude current)
+        #     trail_ln, = ax.plot([], [], "-", lw=2, color=sys_rgb, zorder=2.0, label=fr"last {trail_len} steps")
+        #     trail_pts  = ax.scatter([], [], s=26, zorder=2.1)
+
+        #     # System dot (TOPMOST)
+        #     agent_pt, = ax.plot([], [], "o", ms=7, color="red", zorder=5.0, label=r"system")
+
+        #     # Prediction horizon: fading line via LineCollection + markers (all orange)
+        #     pred_lc = LineCollection([], linewidths=2, zorder=2.2)   # fading per-segment
+        #     ax.add_collection(pred_lc)
+        #     horizon_markers = [ax.plot([], [], "o", ms=5, color=pred_rgb, zorder=2.3)[0] for _ in range(N)]
+
+        #     # Proxy for legend entry (LineCollection doesn't auto-legend)
+        #     ax.plot([], [], "-", lw=2, color=pred_rgb, label="predicted horizon", zorder=2.2)
+
+        #     # Obstacles
+        #     cmap   = plt.get_cmap("tab10")
+        #     colors = cmap.colors
+        #     circles = []
+        #     for i, r in enumerate(radii):
+        #         c = plt.Circle((0, 0), r, fill=False, color=colors[i % len(colors)], lw=2, label=f"obstacle {i+1}", zorder=1.0)
+        #         ax.add_patch(c)
+        #         circles.append(c)
+
+        #     ax.legend(loc="upper right")
+        #     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+        #     def _trail_window(k):
+        #         start = max(0, k - trail_len)
+        #         return start, k + 1
+
+        #     def init():
+        #         trail_ln.set_data([], [])
+        #         trail_pts.set_offsets(np.empty((0, 2)))
+        #         agent_pt.set_data([], [])
+        #         pred_lc.set_segments([])
+        #         for mkr in horizon_markers:
+        #             mkr.set_data([], [])
+        #         for c in circles:
+        #             c.center = (0, 0)
+        #         return [trail_ln, trail_pts, agent_pt, *horizon_markers, *circles]
+
+        #     def update(k):
+        #         # --- system dot (on top)
+        #         xk, yk = system_xy[k]
+        #         agent_pt.set_data([xk], [yk])
+
+        #         # --- trail (line + dots excluding current)
+        #         s, e = _trail_window(k)
+        #         tail_xy = system_xy[s:e]
+        #         trail_ln.set_data(tail_xy[:, 0], tail_xy[:, 1])
+
+        #         pts_xy = tail_xy[:-1]  # exclude current
+        #         if len(pts_xy) > 0:
+        #             trail_pts.set_offsets(pts_xy)
+        #             n = len(pts_xy)
+        #             alphas = np.linspace(0.3, 1.0, n)
+        #             cols = np.tile((*sys_rgb, 1.0), (n, 1))
+        #             cols[:, 3] = alphas
+        #             trail_pts.set_facecolors(cols)
+        #             trail_pts.set_edgecolors('none')
+        #         else:
+        #             trail_pts.set_offsets(np.empty((0, 2)))
+
+        #         # --- prediction horizon (fading line + markers)
+        #         ph = pred_paths[k]                      # (N+1, 2), ph[0] = x_k
+        #         future = ph[1:, :]                      # (N, 2)
+        #         pred_poly = np.vstack((ph[0:1, :], future))  # include current so first segment is visible
+
+        #         if N > 0:
+        #             # segments between consecutive points (N segments)
+        #             segs = np.stack([pred_poly[:-1], pred_poly[1:]], axis=1)  # (N, 2, 2)
+        #             pred_lc.set_segments(segs)
+        #             # fade: near (j=1) opaque → far (j=N) transparent
+        #             seg_cols = np.tile((*pred_rgb, 1.0), (N, 1))
+        #             seg_cols[:, 3] = np.linspace(1.0, 0.35, N)
+        #             pred_lc.set_colors(seg_cols)
+        #             # markers on future points
+        #             for j in range(N):
+        #                 horizon_markers[j].set_data([future[j, 0]], [future[j, 1]])
+        #         else:
+        #             pred_lc.set_segments([])
+        #             for mkr in horizon_markers:
+        #                 mkr.set_data([], [])
+
+        #         # Obstacles
+        #         for i, c in enumerate(circles):
+        #             cx, cy = obs_positions[k, i]
+        #             c.center = (cx, cy)
+
+        #         return [trail_ln, trail_pts, agent_pt, *horizon_markers, *circles]
+
+        #     ani = animation.FuncAnimation(
+        #         fig, update, frames=T, init_func=init, blit=True, interval=interval_ms
+        #     )
+        #     ani.save(out_path, writer="pillow", fps=fps, dpi=90)
+        #     plt.close(fig)
+        def make_system_obstacle_animation_v2(
+            self,
+            states_eval: np.ndarray,      # (T,4) or (T,2)
+            pred_paths: np.ndarray,       # (T, N+1, 2), ph[0] = current x_k
+            obs_positions: np.ndarray,    # (T, m, 2)
+            radii: list,                  # (m,)
+            constraints_x: float,         # used for static window
+            out_path: str,                # output GIF path
+
+            # display controls
+            figsize=(6, 6),
+            dpi=140,
+            legend_outside=True,
+            legend_loc="upper left",
+
+            # zoom / camera
+            camera="static",              # "static" or "follow"
+            follow_width=4.0,             # view width around agent when following
+            follow_height=4.0,
+
+            # timing & colors
+            trail_len: int | None = None, # if None → horizon length
+            fps: int = 12,                # save speed (lower = slower)
+            interval_ms: int = 150,       # live/preview speed (higher = slower)
+            system_color: str = "C0",     # trail color
+            pred_color: str = "orange",   # prediction color (line + markers)
+
+            # output/interaction
+            show: bool = False,           # open interactive window (zoom/pan)
+            save_gif: bool = True,
+            save_mp4: bool = False,
+            mp4_path: str | None = None,
+        ):
+            """Animated plot of system, moving obstacles, trailing path, and predicted horizon."""
+
+            # ---- harmonize lengths (avoid off-by-one) ----
+            T_state = states_eval.shape[0]
+            T_pred  = pred_paths.shape[0]
+            T_obs   = obs_positions.shape[0]
+            T = min(T_state, T_pred, T_obs)  # clamp to shortest
+            system_xy    = states_eval[:T, :2]
+            obs_positions = obs_positions[:T]
+            pred_paths    = pred_paths[:T]
+
+            # shapes
+            Np1 = pred_paths.shape[1]
+            N   = max(0, Np1 - 1)
+            if trail_len is None:
+                trail_len = N
+            m = obs_positions.shape[1]
+
+            # colors
+            sys_rgb  = mcolors.to_rgb(system_color)
+            pred_rgb = mcolors.to_rgb(pred_color)
+
+            # ---- figure/axes ----
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.set_aspect("equal", "box")
+            ax.grid(True, alpha=0.35)
+            ax.set_xlabel(r"$x$")
+            ax.set_ylabel(r"$y$")
+            ax.set_title(r"System + Moving Obstacles + Horizon")
+
+            # initial static window (camera="follow" will override per-frame)
+            span = constraints_x
+            ax.set_xlim(-1.1*span, +0.5*span)
+            ax.set_ylim(-1.1*span, +0.5*span)
+
+            # ---- artists ----
+            # trail: solid line + fading dots (dots exclude current)
+            trail_ln, = ax.plot([], [], "-", lw=2, color=sys_rgb, zorder=2.0, label=fr"last {trail_len} steps")
+            trail_pts  = ax.scatter([], [], s=26, zorder=2.1)
+
+            # system dot (topmost)
+            agent_pt,  = ax.plot([], [], "o", ms=7, color="red", zorder=5.0, label="system")
+
+            # prediction: fading line (LineCollection) + markers (all orange)
+            pred_lc = LineCollection([], linewidths=2, zorder=2.2)
+            ax.add_collection(pred_lc)
+            horizon_markers = [ax.plot([], [], "o", ms=5, color=pred_rgb, zorder=2.3)[0] for _ in range(N)]
+            # proxy line so it appears in legend
+            ax.plot([], [], "-", lw=2, color=pred_rgb, label="predicted horizon", zorder=2.2)
+
+            # obstacles
+            cmap   = plt.get_cmap("tab10")
+            colors = cmap.colors
+            circles = []
+            for i, r in enumerate(radii):
+                c = plt.Circle((0, 0), r, fill=False, color=colors[i % len(colors)], lw=2, label=f"obstacle {i+1}", zorder=1.0)
+                ax.add_patch(c)
+                circles.append(c)
+
+            # legend placement
+            if legend_outside:
+                # leave room on the right
+                fig.subplots_adjust(right=0.80)
+                ax.legend(loc=legend_loc, bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, framealpha=0.9)
+            else:
+                ax.legend(loc="upper right", framealpha=0.9)
+
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+            # ---- helpers ----
+            def _trail_window(k):
+                start = max(0, k - trail_len)
+                return start, k + 1
+
+            def _set_follow_view(xc, yc):
+                half_w = follow_width  / 2.0
+                half_h = follow_height / 2.0
+                ax.set_xlim(xc - half_w, xc + half_w)
+                ax.set_ylim(yc - half_h, yc + half_h)
+
+            # ---- init & update ----
+            def init():
+                trail_ln.set_data([], [])
+                trail_pts.set_offsets(np.empty((0, 2)))
+                agent_pt.set_data([], [])
+                pred_lc.set_segments([])
+                for mkr in horizon_markers:
+                    mkr.set_data([], [])
+                for c in circles:
+                    c.center = (0, 0)
+                return [trail_ln, trail_pts, agent_pt, *horizon_markers, *circles]
+
+            def update(k):
+                xk, yk = system_xy[k]
+                agent_pt.set_data([xk], [yk])
+
+                if camera == "follow":
+                    _set_follow_view(xk, yk)
+
+                # trail: line + fading dots (exclude current)
+                s, e = _trail_window(k)
+                tail_xy = system_xy[s:e]
+                trail_ln.set_data(tail_xy[:, 0], tail_xy[:, 1])
+
+                pts_xy = tail_xy[:-1]
+                if len(pts_xy) > 0:
+                    trail_pts.set_offsets(pts_xy)
+                    n = len(pts_xy)
+                    alphas = np.linspace(0.3, 1.0, n)  # old→light, new→solid
+                    cols = np.tile((*sys_rgb, 1.0), (n, 1))
+                    cols[:, 3] = alphas
+                    trail_pts.set_facecolors(cols)
+                    trail_pts.set_edgecolors('none')
+                else:
+                    trail_pts.set_offsets(np.empty((0, 2)))
+
+                # prediction: fading line + markers
+                ph = pred_paths[k]                  # (N+1, 2)
+                if N > 0:
+                    future = ph[1:, :]              # (N, 2)
+                    pred_poly = np.vstack((ph[0:1, :], future))  # include current for first segment
+                    segs = np.stack([pred_poly[:-1], pred_poly[1:]], axis=1)  # (N, 2, 2)
+                    pred_lc.set_segments(segs)
+
+                    seg_cols = np.tile((*pred_rgb, 1.0), (N, 1))
+                    seg_cols[:, 3] = np.linspace(1.0, 0.35, N)  # near→far fade
+                    pred_lc.set_colors(seg_cols)
+
+                    for j in range(N):
+                        horizon_markers[j].set_data([future[j, 0]], [future[j, 1]])
+                else:
+                    pred_lc.set_segments([])
+                    for mkr in horizon_markers:
+                        mkr.set_data([], [])
+
+                # obstacles
+                for i, c in enumerate(circles):
+                    cx, cy = obs_positions[k, i]
+                    c.center = (cx, cy)
+
+                return [trail_ln, trail_pts, agent_pt, *horizon_markers, *circles]
+
+            # blit=False if camera follows (limits change each frame)
+            blit_flag = (camera != "follow")
+            ani = animation.FuncAnimation(fig, update, frames=T, init_func=init,
+                                        blit=blit_flag, interval=interval_ms)
+
+            # ---- save / show ----
+            if save_gif:
+                ani.save(out_path, writer="pillow", fps=fps, dpi=dpi)
+            if save_mp4:
+                try:
+                    writer = animation.FFMpegWriter(fps=fps, bitrate=2500)
+                    ani.save(mp4_path or out_path.replace(".gif", ".mp4"), writer=writer, dpi=dpi)
+                except Exception as e:
+                    print("MP4 save failed. Install ffmpeg or add it to PATH. Error:", e)
+
+            if show:
+                plt.show()   # interactive zoom/pan
+            else:
+                plt.close(fig)
+                
+                
+        def make_system_obstacle_animation_v3(self,
+        states_eval: np.ndarray,      # (T,4) or (T,2)
+        pred_paths: np.ndarray,       # (T, N+1, 2), ph[0] = current x_k
+        obs_positions: np.ndarray,    # (T, m, 2)
+        radii: list,                  # (m,)
+        constraints_x: float,         # used for static window
+        out_path: str,                # output GIF path
+
+        # display controls
+        figsize=(6.5, 6),
+        dpi=140,
+        legend_outside=True,
+        legend_loc="upper left",
+
+        # zoom / camera
+        camera="static",              # "static" or "follow"
+        follow_width=4.0,             # view width around agent when following
+        follow_height=4.0,
+
+        # timing & colors
+        trail_len: int | None = None, # if None → horizon length
+        fps: int = 12,                # save speed (lower = slower)
+        interval_ms: int = 300,       # live/preview speed (higher = slower)
+        system_color: str = "C0",     # trail color
+        pred_color: str = "orange",   # prediction color (line + markers)
+
+        # output/interaction
+        show: bool = False,           # open interactive window (zoom/pan)
+        save_gif: bool = True,
+        save_mp4: bool = False,
+        mp4_path: str | None = None,
+        ):
+            """Animated plot of system, moving obstacles, trailing path, and predicted horizon.
+            Now also draws faded, dashed obstacle outlines at the next N predicted steps.
+            """
+
+            # ---- harmonize lengths (avoid off-by-one) ----
+            T_state = states_eval.shape[0]
+            T_pred  = pred_paths.shape[0]
+            T_obs   = obs_positions.shape[0]
+            T = min(T_state, T_pred, T_obs)  # clamp to shortest
+            system_xy     = states_eval[:T, :2]
+            obs_positions = obs_positions[:T]
+            pred_paths    = pred_paths[:T]
+
+            # shapes
+            Np1 = pred_paths.shape[1]
+            N   = max(0, Np1 - 1)
+            if trail_len is None:
+                trail_len = N
+            m = obs_positions.shape[1]
+
+            # colors
+            sys_rgb  = mcolors.to_rgb(system_color)
+            pred_rgb = mcolors.to_rgb(pred_color)
+
+            # ---- figure/axes ----
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.set_aspect("equal", "box")
+            ax.grid(True, alpha=0.35)
+            ax.set_xlabel(r"$x$")
+            ax.set_ylabel(r"$y$")
+            ax.set_title(r"System + Moving Obstacles + Horizon")
+
+            # initial static window (camera="follow" will override per-frame)
+            span = constraints_x
+            ax.set_xlim(-1.1*span, +0.2*span)   # widened so circles aren’t clipped
+            ax.set_ylim(-1.1*span, +0.2*span)
+
+            # ---- artists ----
+            # trail: solid line + fading dots (dots exclude current)
+            trail_ln, = ax.plot([], [], "-", lw=2, color=sys_rgb, zorder=2.0, label=fr"last {trail_len} steps")
+            trail_pts  = ax.scatter([], [], s=26, zorder=2.1)
+
+            # system dot (topmost)
+            agent_pt,  = ax.plot([], [], "o", ms=7, color="red", zorder=5.0, label="system")
+
+            # prediction: fading line (LineCollection) + markers (all orange)
+            pred_lc = LineCollection([], linewidths=2, zorder=2.2)
+            ax.add_collection(pred_lc)
+            horizon_markers = [ax.plot([], [], "o", ms=5, color=pred_rgb, zorder=2.3)[0] for _ in range(N)]
+            # proxy line so it appears in legend
+            ax.plot([], [], "-", lw=2, color=pred_rgb, label="predicted horizon", zorder=2.2)
+
+            # obstacles (current time k)
+            cmap   = plt.get_cmap("tab10")
+            colors = cmap.colors
+            circles = []
+            for i, r in enumerate(radii):
+                c = plt.Circle((0, 0), r, fill=False, color=colors[i % len(colors)],
+                            lw=2, label=f"obstacle {i+1}", zorder=1.0)
+                ax.add_patch(c)
+                circles.append(c)
+
+            # --- NEW: predicted obstacle outlines for the next N steps (ghosted) ---
+            # one dashed circle per (future step h=1..N, obstacle i=1..m)
+            pred_alpha_seq = np.linspace(0.35, 0.3, max(N, 1))  # nearer -> darker, farther -> lighter
+            pred_circles_layers = []  # list of lists: [layer_h][i] -> patch
+            for h in range(1, N+1):
+                layer = []
+                a = float(pred_alpha_seq[h-1])
+                for i, r in enumerate(radii):
+                    pc = plt.Circle((0, 0), r, fill=False,
+                                    color=colors[i % len(colors)],
+                                    lw=1.2, linestyle="--", alpha=a,
+                                    zorder=0.8)  # behind current circles
+                    ax.add_patch(pc)
+                    layer.append(pc)
+                pred_circles_layers.append(layer)
+            if N > 0:
+                # legend proxy for predicted obstacle outlines
+                ax.plot([], [], linestyle="--", lw=1.2, color=colors[0],
+                        alpha=0.3, label="obstacle (predicted)")
+
+            # legend placement
+            if legend_outside:
+                fig.subplots_adjust(right=0.68)
+                ax.legend(loc=legend_loc, bbox_to_anchor=(1.02, 1.0),
+                        borderaxespad=0.0, framealpha=0.9)
+            else:
+                ax.legend(loc="upper right", framealpha=0.9)
+
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+            # ---- helpers ----
+            def _trail_window(k):
+                start = max(0, k - trail_len)
+                return start, k + 1
+
+            def _set_follow_view(xc, yc):
+                half_w = follow_width  / 2.0 + max(radii)
+                half_h = follow_height / 2.0 + max(radii)
+                ax.set_xlim(xc - half_w, xc + half_w)
+                ax.set_ylim(yc - half_h, yc + half_h)
+
+            # ---- init & update ----
+            def init():
+                trail_ln.set_data([], [])
+                trail_pts.set_offsets(np.empty((0, 2)))
+                agent_pt.set_data([], [])
+                pred_lc.set_segments([])
+                for mkr in horizon_markers:
+                    mkr.set_data([], [])
+                for c in circles:
+                    c.center = (0, 0)
+                for layer in pred_circles_layers:
+                    for pc in layer:
+                        pc.center = (0, 0)
+                        pc.set_visible(False)
+                return [trail_ln, trail_pts, agent_pt, *horizon_markers, *circles,
+                        *[pc for layer in pred_circles_layers for pc in layer]]
+
+            def update(k):
+                xk, yk = system_xy[k]
+                agent_pt.set_data([xk], [yk])
+
+                if camera == "follow":
+                    _set_follow_view(xk, yk)
+
+                # trail: line + fading dots (exclude current)
+                s, e = _trail_window(k)
+                tail_xy = system_xy[s:e]
+                trail_ln.set_data(tail_xy[:, 0], tail_xy[:, 1])
+
+                pts_xy = tail_xy[:-1]
+                if len(pts_xy) > 0:
+                    trail_pts.set_offsets(pts_xy)
+                    n = len(pts_xy)
+                    alphas = np.linspace(0.3, 1.0, n)  # old→light, new→solid
+                    cols = np.tile((*sys_rgb, 1.0), (n, 1))
+                    cols[:, 3] = alphas
+                    trail_pts.set_facecolors(cols)
+                    trail_pts.set_edgecolors('none')
+                else:
+                    trail_pts.set_offsets(np.empty((0, 2)))
+
+                # prediction: fading line + markers
+                ph = pred_paths[k]                  # (N+1, 2)
+                if N > 0:
+                    future = ph[1:, :]              # (N, 2)
+                    pred_poly = np.vstack((ph[0:1, :], future))   # include current for first segment
+                    segs = np.stack([pred_poly[:-1], pred_poly[1:]], axis=1)  # (N, 2, 2)
+                    pred_lc.set_segments(segs)
+
+                    seg_cols = np.tile((*pred_rgb, 1.0), (N, 1))
+                    seg_cols[:, 3] = np.linspace(1.0, 0.35, N)  # near→far fade
+                    pred_lc.set_colors(seg_cols)
+
+                    for j in range(N):
+                        horizon_markers[j].set_data([future[j, 0]], [future[j, 1]])
+                else:
+                    pred_lc.set_segments([])
+                    for mkr in horizon_markers:
+                        mkr.set_data([], [])
+
+                # obstacles (current time k)
+                for i, c in enumerate(circles):
+                    cx, cy = obs_positions[k, i]
+                    c.center = (cx, cy)
+
+                # --- predicted obstacle outlines at k+1..k+N ---
+                if N > 0:
+                    for h, layer in enumerate(pred_circles_layers, start=1):
+                        t = min(k + h, T - 1)  # clamp to last available pose
+                        for i, pc in enumerate(layer):
+                            cx, cy = obs_positions[t, i]
+                            pc.center = (cx, cy)
+                            pc.set_visible(True)
+
+                return [trail_ln, trail_pts, agent_pt, *horizon_markers, *circles,
+                        *[pc for layer in pred_circles_layers for pc in layer]]
+
+            # blit=False if camera follows (limits change each frame)
+            blit_flag = (camera != "follow")
+            ani = animation.FuncAnimation(fig, update, frames=T, init_func=init,
+                                        blit=blit_flag, interval=interval_ms)
+
+            # ---- save / show ----
+            if save_gif:
+                ani.save(out_path, writer="pillow", fps=fps, dpi=dpi)
+            if save_mp4:
+                try:
+                    writer = animation.FFMpegWriter(fps=fps, bitrate=2500)
+                    ani.save(mp4_path or out_path.replace(".gif", ".mp4"),
+                            writer=writer, dpi=dpi)
+                except Exception as e:
+                    print("MP4 save failed. Install ffmpeg or add it to PATH. Error:", e)
+
+            if show:
+                plt.show()
+            else:
+                plt.close(fig)        
 
         def plot_B_update(self, B_update_history, experiment_folder):
             
@@ -1848,6 +2444,23 @@ class RLclass:
             plt.tight_layout()
             self.save_figures([(fig_nn, "NN_mean_B_update_over_time")], experiment_folder)
             plt.close(fig_nn)
+            
+        def plot_spectral_radius(self, experiment_folder):
+            if not self.spectral_radii_hist:
+                return
+            arr = np.asarray(self.spectral_radii_hist)  # shape: (updates, num_recurrent_layers)
+            fig = plt.figure()
+            for j in range(arr.shape[1]):
+                plt.plot(arr[:, j], "o-", label=rf"$\rho(W_{{hh,{j}}})$")
+            plt.axhline(1, linestyle="--", label="target ρ")
+            plt.xlabel("Update iteration")
+            plt.ylabel("Spectral radius")
+            plt.title("Recurrent spectral radii over training")
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            self.save_figures([(fig, "spectral_radius_over_time.svg")], experiment_folder)
+            # plt.close(fig)    
         
         def ADAM(self, iteration, gradient, exp_avg, exp_avg_sq,
             learning_rate, beta1, beta2, eps = 1e-8): 
@@ -1906,7 +2519,7 @@ class RLclass:
 
             return params
 
-        def noise_scale_by_distance(self, x, y, max_radius=2): #maxradius was 0.5
+        def noise_scale_by_distance(self, x, y, max_radius=1.0): #maxradius was 2
             
             
             """
@@ -1925,7 +2538,7 @@ class RLclass:
             if dist >= max_radius:
                 return 1
             else:
-                return (dist / max_radius)
+                return (dist / max_radius)**2
 
         def cholesky_added_multiple_identity(self,
             A, beta: float = 1e-3, maxiter: int = 1000
@@ -1977,14 +2590,44 @@ class RLclass:
             """
             
             self.layers_list
-            
-            for i in range(len(self.layers_list)-1):
+            L = len(self.layers_list) - 1            # total layers
+            for i in range(L-1): #all but last layer
                 Whh = params_rnn_list[3*i + 2]  # recurrent weights
                 eigvals = np.linalg.eigvals(Whh)
                 rho = np.max(np.abs(eigvals)).real 
                 print(f"Hidden layer {i+1} recurrent weight matrix spectral radius: {rho:.4f}")
                 
-        def RNN_warmstart(self, x0, params):
+        # def RNN_warmstart(self, x0, params):
+        #     """
+        #     Perform a forward pass through the RNN to obtain the initial hidden state.
+
+        #     Args:
+        #         x0 (ns,):  
+        #             Initial state of the system.
+        #         params (dict):  
+        #             Dictionary of system and RNN parameters.
+
+        #     Returns:
+        #         hidden_t0:  
+        #             Initial hidden-state vectors for the RNN layers.
+        #     """
+        #     warmup_steps = 10  # number of warmup steps
+        #     # initial hidden states are zero
+        #     h0 = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
+        #          for i in range(len(self.mpc.rnn.layers_list)-2)
+        #          ]
+        #     x_t0 = np.array(x0).flatten()[:self.rnn_input_size]
+        #     # print(f"RNN warmstart raw:{x_t0}")
+        #     x_t0 = self.mpc.rnn.normalization_z(x_t0)
+        #     # print(f"RNN warmstart normalized:{self.mpc.rnn.normalization_z(x_t0)}")
+        #     params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])
+        #     for _ in range(warmup_steps):
+        #         # initial hidden states are zero
+        #         *h0, _ = self.get_hidden_func(*h0, x_t0, *params_rnn)
+            
+        #     return h0
+        
+        def RNN_warmstart(self, params):
             """
             Perform a forward pass through the RNN to obtain the initial hidden state.
 
@@ -1998,19 +2641,42 @@ class RLclass:
                 hidden_t0:  
                     Initial hidden-state vectors for the RNN layers.
             """
-            warmup_steps = 5  # number of warmup steps
-            # initial hidden states are zero
-            h0 = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
-                 for i in range(len(self.mpc.rnn.layers_list)-2)
-                 ]
+            self.x_prev_VMPC        = cs.DM()  
+            self.lam_x_prev_VMPC    = cs.DM()  
+            self.lam_g_prev_VMPC    = cs.DM()  
+            
+            
+            state, _ = self.env.reset(seed=self.seed, options={})
+            self.obst_motion.reset()
+            
+            xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
+            
+            hidden_in = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
+                    for i in range(len(self.mpc.rnn.layers_list)-2)
+                    ]
+            
+            warmup_steps = 50  # number of warmup steps
+
+            params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])
             for _ in range(warmup_steps):
-                x_t0 = np.array(x0).flatten()[:self.rnn_input_size]
-                # print(f"RNN warmstart raw:{x_t0}")
-                x_t0 = self.mpc.rnn.normalization_z(x_t0)
-                # print(f"RNN warmstart normalized:{self.mpc.rnn.normalization_z(x_t0)}")
-                params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])
-                # initial hidden states are zero
-                h0, _ = self.get_hidden_func(*h0, x_t0, *params_rnn)
+                _, _, hidden_in, _, _, _ = self.V_MPC(params=params, x=state, 
+                                                              xpred_list=xpred_list, 
+                                                              ypred_list=ypred_list, 
+                                                              hidden_in=hidden_in)
+                
+                # state, _, done, _, _ = self.env.step(action)
+                
+                _ = self.obst_motion.step()
+                xpred_list, ypred_list = self.obst_motion.predict_states(self.horizon)
+                
+            # x_t0 = np.array(X).flatten()[:self.rnn_input_size]
+            # # print(f"RNN warmstart raw:{x_t0}")
+            # x_t0 = self.mpc.rnn.normalization_z(x_t0)
+            # # print(f"RNN warmstart normalized:{self.mpc.rnn.normalization_z(x_t0)}")
+            # params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])    
+            # # initial hidden states are zero    
+            # *h0, _ = self.get_hidden_func(*h0, x_t0, *params_rnn)
+            h0 = hidden_in
             
             return h0
             
@@ -2060,8 +2726,8 @@ class RLclass:
             A_flat = cs.reshape(params["A"] , -1, 1)
             B_flat = cs.reshape(params["B"], -1, 1)
             P_diag = cs.diag(params["P"])
-            Q_flat = cs.reshape(params["Q"], -1, 1)
-            R_flat = cs.reshape(params["R"], -1, 1)
+            Q_flat = cs.diag(params["Q"])#cs.reshape(params["Q"], -1, 1)
+            R_flat = cs.diag(params["R"])#cs.reshape(params["R"], -1, 1)
 
             solution = self.solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], 
                                                        P_diag, Q_flat, R_flat,  params["rnn_params"], 
@@ -2095,8 +2761,8 @@ class RLclass:
             
             # remember the slack variables for stage cost computation (in the evaluation stage cost)
             self.S_VMPC = solution["x"][self.na * (self.horizon) + self.ns * (self.horizon+1):]
-
-            return u_opt, solution["f"], hidden_t1, alpha_list
+            plan_xy = np.array(X[:2, :]).T
+            return u_opt, solution["f"], hidden_t1, alpha_list, plan_xy, X
         
         def V_MPC_rand(self, params, x, rand, xpred_list, ypred_list, hidden_in):
             """
@@ -2141,8 +2807,8 @@ class RLclass:
             A_flat = cs.reshape(params["A"] , -1, 1)
             B_flat = cs.reshape(params["B"], -1, 1)
             P_diag = cs.diag(params["P"])#cs.reshape(params["P"], -1, 1)
-            Q_flat = cs.reshape(params["Q"], -1, 1)
-            R_flat = cs.reshape(params["R"], -1, 1)
+            Q_flat = cs.diag(params["Q"])#cs.reshape(params["Q"], -1, 1)
+            R_flat = cs.diag(params["R"])#cs.reshape(params["R"], -1, 1)
 
 
             solution = self.solver_inst_random(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], 
@@ -2177,7 +2843,7 @@ class RLclass:
             # remember the slack variables for stage cost computation (in the RL stage cost)
             self.S_VMPC_rand = solution["x"][self.na * (self.horizon) + self.ns * (self.horizon+1):]
 
-            return u_opt, hidden_t1, alpha_list
+            return u_opt, hidden_t1, alpha_list, X
 
         def Q_MPC(self, params, action, x, xpred_list, ypred_list, hidden_in):
             
@@ -2218,8 +2884,8 @@ class RLclass:
                     """
                      
             # Build input‐action bounds (note horizon−1 controls remain free after plugging in `action`)
-            U_lower_bound = -np.ones(self.na * (self.horizon-1))
-            U_upper_bound = np.ones(self.na * (self.horizon-1))
+            U_lower_bound = -CONSTRAINTS_U*np.ones(self.na * (self.horizon-1))
+            U_upper_bound = CONSTRAINTS_U*np.ones(self.na * (self.horizon-1))
 
             #Assemble full lbx/ubx: [ x0; X(1…H); action; remaining U; slack ]
             lbx = np.concatenate([np.asarray(x).flatten(), self.X_lower_bound, 
@@ -2236,8 +2902,8 @@ class RLclass:
             A_flat = cs.reshape(params["A"] , -1, 1)
             B_flat = cs.reshape(params["B"], -1, 1)
             P_diag = cs.diag(params["P"])#cs.reshape(params["P"], -1, 1)
-            Q_flat = cs.reshape(params["Q"], -1, 1)
-            R_flat = cs.reshape(params["R"], -1, 1)
+            Q_flat = cs.diag(params["Q"])#cs.reshape(params["Q"], -1, 1)
+            R_flat = cs.diag(params["R"])#cs.reshape(params["R"], -1, 1)
 
             solution = self.solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, 
                                                        Q_flat, R_flat, params["rnn_params"], 
@@ -2270,7 +2936,7 @@ class RLclass:
             self.lam_x_prev_QMPC = solution["lam_x"]
             self.lam_g_prev_QMPC = solution["lam_g"]
             
-            return solution["x"], solution["f"], lagrange_mult_g, lam_lbx, lam_ubx, lam_p, hidden_t1
+            return solution["x"], solution["f"], lagrange_mult_g, lam_lbx, lam_ubx, lam_p, hidden_t1, X
             
         def stage_cost(self, action, state, S, hx):
             """
@@ -2298,7 +2964,10 @@ class RLclass:
             
             return (
                 state.T @ Qstage @ state
-                + action.T @ Rstage @ action + self.slack_penalty_RL*(np.sum(S)/(self.horizon+self.mpc.rnn.obst.obstacle_num)) + np.sum(2e5*violations)
+                + action.T @ Rstage @ action 
+                + self.slack_penalty_RL_L1*(np.sum(S)/(self.horizon+self.mpc.rnn.obst.obstacle_num))
+                + 0.5 * self.slack_penalty_RL_L2* (np.sum(S**2) / (self.horizon+self.mpc.rnn.obst.obstacle_num)) 
+                + np.sum(self.violation_penalty*violations)
             )
         
         def evaluation_step(self, params, experiment_folder, episode_duration):
@@ -2312,6 +2981,9 @@ class RLclass:
                 episode_duration (int):
                     Number of steps in the evaluation episode.
             """
+            
+            hidden_in = self.RNN_warmstart(params)
+            
             
             state, _ = self.env.reset(seed=self.seed, options={})
             self.obst_motion.reset()
@@ -2328,28 +3000,72 @@ class RLclass:
             alphas = []
             
             
-            hidden_in_VMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
-                    for i in range(len(self.mpc.rnn.layers_list)-2)
-                    ]
+            # hidden_in_VMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
+            #         for i in range(len(self.mpc.rnn.layers_list)-2)
+            #         ]
             
             obs_positions = [self.obst_motion.current_positions()]
             
             self.x_prev_VMPC        = cs.DM()  
             self.lam_x_prev_VMPC    = cs.DM()  
             self.lam_g_prev_VMPC    = cs.DM()  
+            
+            
+            slacks_eval = []   # will become shape (T, m, N)
+
+            m = self.mpc.rnn.obst.obstacle_num
+            N = self.horizon
+
+            def unflatten_slack(S_raw, m, N):
+                """
+                Turn S_flat (m*N,) or (m*N,1) from CasADi into (m, N).
+                CasADi reshape is column-major (Fortran order): columns are horizon j.
+                """
+                S_raw = np.array(cs.DM(S_raw).full())  # to dense numpy
+                # If already 2D (m, N), accept it.
+                if S_raw.shape == (m, N):
+                    return S_raw
+                # If (N, m), transpose.
+                if S_raw.shape == (N, m):
+                    return S_raw.T
+                # If flat of length m*N → reshape column-major
+                flat = S_raw.reshape(-1)
+                if flat.size == m * N:
+                    return flat.reshape(m, N, order="F")
+                raise ValueError(f"Unexpected slack shape {S_raw.shape}, cannot make (m={m}, N={N}).")
+            
+            
+            # _, _, _, _, _, X_VMPC = self.V_MPC(params=params, x=state, 
+            #                                                   xpred_list=xpred_list, 
+            #                                                   ypred_list=ypred_list, 
+            #                                                   hidden_in=hidden_in_VMPC)
+            plans_eval = []   # each element will be (N+1, 2)
+            
+            # flat_input = self.flat_input_fn(X_VMPC, xpred_list, ypred_list)
+            
+            # hidden_in_VMPC = self.RNN_warmstart(flat_input, params)
+            
+            # self.x_prev_VMPC        = cs.DM()  
+            # self.lam_x_prev_VMPC    = cs.DM()  
+            # self.lam_g_prev_VMPC    = cs.DM()  
 
             for i in range(episode_duration):
-                action, _, hidden_in_VMPC, alpha = self.V_MPC(params=params, x=state, 
+                action, _, hidden_in, alpha, plan_xy, _ = self.V_MPC(params=params, x=state, 
                                                               xpred_list=xpred_list, 
                                                               ypred_list=ypred_list, 
-                                                              hidden_in=hidden_in_VMPC)
+                                                              hidden_in=hidden_in)
+                
+                
+                S_now_mN = unflatten_slack(self.S_VMPC, m, N)   # shape (m, N)
+                slacks_eval.append(S_now_mN)  
+                plans_eval.append(plan_xy)
 
                 statsv = self.solver_inst.stats()
                 if statsv["success"] == False:
                     print("V_MPC NOT SUCCEEDED in EVALUATION")
                 alphas.append(alpha)
                 
-                action = cs.fmin(cs.fmax(cs.DM(action), -1), 1)
+                action = cs.fmin(cs.fmax(cs.DM(action), -CONSTRAINTS_U), CONSTRAINTS_U)
                 stage_cost_eval.append(self.stage_cost(action, state, self.S_VMPC, hx))
                 
                 # print(f"evaluation step {i}, action: {action}, slack: {np.sum(5e4*self.S_VMPC)}")
@@ -2374,6 +3090,8 @@ class RLclass:
             obs_positions = np.array(obs_positions) 
             hx_list = np.vstack(hx_list)
             alphas = np.array(alphas)
+            slacks_eval = np.stack(slacks_eval, axis=0)
+            plans_eval = np.array(plans_eval) 
             
             sum_stage_cost = np.sum(stage_cost_eval)
             print(f"Stage Cost: {sum_stage_cost}")
@@ -2449,7 +3167,7 @@ class RLclass:
                 plt.title(rf"Obstacle {i+1}: $h_{{{i+1}}}(x_k)$ Over Time")
                 plt.grid()
                 self.save_figures([(fig_hi,
-                            f"hx_obstacle_{self.eval_count}_SC_{sum_stage_cost}.svg")],
+                            f"hx_obstacle_{i+1}_{self.eval_count}_SC_{sum_stage_cost}.svg")],
                             experiment_folder, "Evaluation")
                 
             # Alphas from RNN
@@ -2468,19 +3186,65 @@ class RLclass:
                         f"alpha_{self.eval_count}_SC_{sum_stage_cost}.svg")],
                         experiment_folder, "Evaluation")
             
+            T, m, N = slacks_eval.shape
+            t_eval = np.arange(T)  # or your actual time vector
+
+            for oi in range(m):
+                fig_slack_i = plt.figure(figsize=(10, 4))
+                for j in range(N):
+                    plt.plot(t_eval, slacks_eval[:, oi, j], label=rf"horizon $j={j+1}$", marker="o", linewidth=1.2)
+                plt.axhline(0.0, color="k", linewidth=0.8, alpha=0.6)
+                plt.xlabel(r"Iteration $k$")
+                plt.ylabel(rf"Slack $S_{{{oi+1},j}}(k)$")
+                plt.title(rf"Obstacle {oi+1}: slacks across prediction horizon")
+                plt.grid(True, alpha=0.3)
+                plt.legend(ncol=min(4, N), fontsize="small")
+                plt.tight_layout()
+
+                self.save_figures(
+                    [(fig_slack_i, f"slack_obs{oi+1}_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg")],
+                    experiment_folder,
+                    "Evaluation",
+                )
+                # plt.close(fig_slack_i)  
+            
             target_folder = os.path.join(experiment_folder, "evaluation")
             out_gif = os.path.join(target_folder, f"system_and_obstacle_{self.eval_count}_SC_{sum_stage_cost}.gif")
-            self. make_system_obstacle_animation(
-            states_eval,
-            obs_positions,
-            self.mpc.rnn.obst.radii,
-            CONSTRAINTS_X[0],
-            out_gif,
+            # self. make_system_obstacle_animation(
+            # states_eval,
+            # obs_positions,
+            # self.mpc.rnn.obst.radii,
+            # CONSTRAINTS_X[0],
+            # out_gif,
+            # )
+            T_pred = plans_eval.shape[0]
+            # self.make_system_obstacle_animation_v2(
+            #     states_eval[:T_pred],
+            #     plans_eval,
+            #     obs_positions[:T_pred],
+            #     self.mpc.rnn.obst.radii,
+            #     CONSTRAINTS_X[0],
+            #     out_gif,
+            #     trail_len=self.horizon      # fade the tail to last H
+            # )
+            
+            out_gif = os.path.join(target_folder, f"system_and_obstaclewithobstpred_{self.eval_count}_SC_{sum_stage_cost}.gif")
+            
+            self.make_system_obstacle_animation_v3(
+                states_eval[:T_pred],
+                plans_eval,
+                obs_positions[:T_pred],
+                self.mpc.rnn.obst.radii,
+                CONSTRAINTS_X[0],
+                out_gif,
+                trail_len=self.horizon,      # fade the tail to last H
+                camera="follow",
+                follow_width=1.0,             # view width around agent when following
+                follow_height=1.0,
             )
-
             self.update_learning_rate(sum_stage_cost, params)
 
-            self.eval_count += 1
+            self.eval_count += 1 
 
             return 
         
@@ -2492,17 +3256,21 @@ class RLclass:
             function responsible for carryin out parameter updates after each episode
             """
             P_diag = cs.diag(params["P"])
+            Q_diag = cs.diag(params["Q"])
+            R_diag = cs.diag(params["R"])
 
             #vector of parameters which are differenitated with respect to
-            theta_vector_num = cs.vertcat(P_diag, params["rnn_params"])
-            # theta_vector_num = cs.vertcat(params["rnn_params"])
+            # theta_vector_num = cs.vertcat(P_diag, Q_diag, R_diag, params["rnn_params"])
+            # theta_vector_num = cs.vertcat(P_diag, params["rnn_params"])
+            theta_vector_num = cs.vertcat(params["rnn_params"])
 
             identity = np.eye(theta_vector_num.shape[0])
 
             # print(f"before updates : {theta_vector_num}")
 
             # alpha_vec is resposible for the updates
-            alpha_vec = cs.vertcat(self.alpha*np.ones(4), self.alpha*np.ones(theta_vector_num.shape[0]-4)*1e-2)
+            # alpha_vec = cs.vertcat(self.alpha*np.ones(self.ns+self.ns+self.na)*5e1, self.alpha*np.ones(theta_vector_num.shape[0]-(self.ns+self.ns+self.na))*1e-2)
+            alpha_vec = cs.vertcat(self.alpha*np.ones(self.ns-2)*1e1, self.alpha*np.ones(self.ns-2)*1e1, self.alpha*np.ones(theta_vector_num.shape[0]-(self.ns))*1e-2)
             # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]))
             # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]-2), self.alpha,self.alpha*1e-5)
             
@@ -2530,8 +3298,9 @@ class RLclass:
             
             # constrained update qp update
             solution = self.qp_solver(
-                    p=cs.vertcat(theta_vector_num, dtheta),
-                    lbg=cs.vertcat(np.zeros(4), -np.inf*np.ones(theta_vector_num.shape[0]-4)),
+                    p=cs.vertcat(theta_vector_num, -dtheta), #OMG DO I PUT MINUES HERE?????????
+                    # lbg=cs.vertcat(np.zeros(self.ns+self.ns+self.na), -np.inf*np.ones(theta_vector_num.shape[0]-(self.ns+self.ns+self.na))),
+                    lbg=cs.vertcat(np.zeros(self.ns), -np.inf*np.ones(theta_vector_num.shape[0]-(self.ns))),
                     ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
                     # lbg=cs.vertcat(-np.inf*np.ones(theta_vector_num.shape[0])),
                     # ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
@@ -2550,26 +3319,41 @@ class RLclass:
             print(f"theta_vector_num: {theta_vector_num}")
 
             P_diag_shape = self.ns*1
+            Q_diag_shape = self.ns*1
+            R_diag_shape = self.na*1
             #constructing the diagonal posdef P matrix 
-            P_posdef = cs.diag(theta_vector_num[:P_diag_shape])
+            # P_posdef = cs.diag(theta_vector_num[:P_diag_shape])
+            # Q_posdef = cs.diag(theta_vector_num[P_diag_shape:P_diag_shape+Q_diag_shape])
+            # R_posdef = cs.diag(theta_vector_num[P_diag_shape+Q_diag_shape:P_diag_shape+Q_diag_shape+R_diag_shape])
 
-            params["P"] = P_posdef
-            params["rnn_params"] = theta_vector_num[P_diag_shape:]       
-            # params["rnn_params"] = theta_vector_num  
+            # params["P"] = P_posdef
+            # params["rnn_params"] = theta_vector_num[P_diag_shape+Q_diag_shape+R_diag_shape:]
+            # params["Q"] = Q_posdef
+            # params["R"] = R_posdef      
+            # params["rnn_params"] = theta_vector_num[P_diag_shape:]
+            params["rnn_params"] = theta_vector_num
             
             params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])
-            # self.check_whh_spectral_radii(params_rnn)
+            self.check_whh_spectral_radii(params_rnn)
+            rhos = []
+            L = len(self.layers_list) - 1            # total layers
+            for i in range(L-1):                      # recurrent layers only (all but last)
+                Whh = np.array(params_rnn[3*i + 2])   # Wih, bih, Whh triplets → Whh index = 2 within triplet
+                eig = np.linalg.eigvals(Whh)
+                rhos.append(float(np.max(np.abs(eig)).real))
+            self.spectral_radii_hist.append(rhos)
 
             return params
         
 
         def rl_trainingloop(self, episode_duration, num_episodes, replay_buffer, episode_updatefreq, experiment_folder):
     
-            #to store for plotting
-            params_history_P = [self.params_innit["P"]]
-
             #for the for loop
             params = self.params_innit
+            hidden_in = self.RNN_warmstart(params)
+    
+            #to store for plotting
+            params_history_P = [self.params_innit["P"]]
             
             x, _ = self.env.reset(seed=self.seed, options={})
             # reset obstacle motion
@@ -2611,17 +3395,65 @@ class RLclass:
             
             #TODO: Review how hidden states are initialized
             
-            hidden_in_VMPCrand = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
-                 for i in range(len(self.mpc.rnn.layers_list)-2)
-                 ]
+            # hidden_in_VMPCrand = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
+            #      for i in range(len(self.mpc.rnn.layers_list)-2)
+            #      ]
             
-            hidden_in_QMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
-                 for i in range(len(self.mpc.rnn.layers_list)-2)
-                 ]
+            # hidden_in_QMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
+            #      for i in range(len(self.mpc.rnn.layers_list)-2)
+            #      ]
             
-            hidden_in_VMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
-                 for i in range(len(self.mpc.rnn.layers_list)-2)
-                 ]
+            # hidden_in_VMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
+            #      for i in range(len(self.mpc.rnn.layers_list)-2)
+            #      ]
+            
+            # noise = self.noise_scalingfactor*self.noise_scale_by_distance(x[0],x[1])
+            # rand = noise * self.np_random.normal(loc=0, scale=self.noise_variance, size = (2,1))
+            
+            # u, _, _, X_VMPC_rand = self.V_MPC_rand(params=params, x=x, rand = rand, xpred_list=xpred_list, 
+            #                         ypred_list=ypred_list, hidden_in=hidden_in_VMPCrand)
+            
+            # flat_input = self.flat_input_fn(X_VMPC_rand, xpred_list, ypred_list)
+            
+            # hidden_in_VMPCrand = self.RNN_warmstart(flat_input, params)
+            
+            
+            # _, _, _, _, _, _, _, X_QMPC = self.Q_MPC(params=params, action=u, 
+            #                                                                                        x=x, 
+            #                                                                                        xpred_list=xpred_list,
+            #                                                                                        ypred_list=ypred_list,
+            #                                                                                     hidden_in=hidden_in_QMPC)
+            
+            # flat_input = self.flat_input_fn(X_QMPC, xpred_list, ypred_list)
+            
+            # hidden_in_QMPC = self.RNN_warmstart(flat_input, params)
+            
+            # hidden_in_VMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
+            #      for i in range(len(self.mpc.rnn.layers_list)-2)
+            #      ]
+            
+            # _, _, _, _, _, X_VMPC = self.V_MPC(params=params, 
+            #                                              x=x, 
+            #                                              xpred_list=xpred_list, 
+            #                                              ypred_list=ypred_list, 
+            #                                              hidden_in=hidden_in_VMPC)
+            
+            # flat_input = self.flat_input_fn(X_VMPC, xpred_list, ypred_list)
+            
+            # hidden_in_VMPC = self.RNN_warmstart(flat_input, params)
+            
+            # self.x_prev_VMPC        = cs.DM()  
+            # self.lam_x_prev_VMPC    = cs.DM()  
+            # self.lam_g_prev_VMPC    = cs.DM()  
+
+            # self.x_prev_QMPC        = cs.DM()  
+            # self.lam_x_prev_QMPC    = cs.DM()  
+            # self.lam_g_prev_QMPC    = cs.DM()  
+
+            # self.x_prev_VMPCrandom  = cs.DM()  
+            # self.lam_x_prev_VMPCrandom = cs.DM()  
+            # self.lam_g_prev_VMPCrandom = cs.DM()
+
 
             print(f"trainingloop initialized")
             
@@ -2629,13 +3461,15 @@ class RLclass:
                 
                 # if i == 36*50*150:
                 #     self.alpha = self.alpha*0.01
+                # if i == (2*50*150-3*150):
+                #     self.alpha = self.alpha*0.01
                 
                 noise = self.noise_scalingfactor*self.noise_scale_by_distance(x[0],x[1])
                 rand = noise * self.np_random.normal(loc=0, scale=self.noise_variance, size = (2,1))
 
-                u, hidden_in_VMPCrand, alpha = self.V_MPC_rand(params=params, x=x, rand = rand, xpred_list=xpred_list, 
-                                    ypred_list=ypred_list, hidden_in=hidden_in_VMPCrand)
-                u = cs.fmin(cs.fmax(cs.DM(u), -1), 1)
+                u, hidden_in, alpha, _ = self.V_MPC_rand(params=params, x=x, rand = rand, xpred_list=xpred_list, 
+                                    ypred_list=ypred_list, hidden_in=hidden_in)
+                u = cs.fmin(cs.fmax(cs.DM(u), -CONSTRAINTS_U), CONSTRAINTS_U)
 
                 alphas.append(alpha)
                 actions.append(u)
@@ -2646,12 +3480,12 @@ class RLclass:
                     self.error_happened = True
 
      
-                solution, Qcost, lagrange_mult_g, lam_lbx, lam_ubx, _, hidden_in_QMPC = self.Q_MPC(params=params, 
+                solution, Qcost, lagrange_mult_g, lam_lbx, lam_ubx, _, _, _ = self.Q_MPC(params=params, 
                                                                                                    action=u, 
                                                                                                    x=x, 
                                                                                                    xpred_list=xpred_list,
                                                                                                    ypred_list=ypred_list,
-                                                                                                hidden_in=hidden_in_QMPC)
+                                                                                                hidden_in=hidden_in)
      
 
                 statsq = self.solver_inst.stats()
@@ -2676,11 +3510,11 @@ class RLclass:
                 # print(f"x_2: {x}")
                 # print(f"params_3: {params}")
 
-                _, Vcost, hidden_in_VMPC, _ = self.V_MPC(params=params, 
+                _, Vcost, _, _, _, _ = self.V_MPC(params=params, 
                                                          x=x, 
                                                          xpred_list=xpred_list, 
                                                          ypred_list=ypred_list, 
-                                                         hidden_in=hidden_in_VMPC)
+                                                         hidden_in=hidden_in)
 
                 statsv = self.solver_inst.stats()
                 if statsv["success"] == False:
@@ -2699,7 +3533,7 @@ class RLclass:
                                     U,
                                     cs.DM(xpred_list), 
                                     cs.DM(ypred_list), 
-                                    *hidden_in_QMPC, 
+                                    *hidden_in, 
                                     *params_rnn)
 
                 phi_list.append(np.array(phi).reshape(self.horizon, self.mpc.m))
@@ -2722,11 +3556,12 @@ class RLclass:
                     params["rnn_params"],
                     xpred_list, 
                     ypred_list,
-                    *hidden_in_QMPC 
+                    *hidden_in 
                 )
 
                 # first order update
-                B_update = -TD*qlagrange_numeric_jacob
+                #removed minus for just notatiojn wise
+                B_update = TD*qlagrange_numeric_jacob
                 grad_temp.append(qlagrange_numeric_jacob)
                 B_update_buffer.append(B_update)
                         
@@ -2938,22 +3773,12 @@ class RLclass:
                     # self.evaluation_step(params=params, experiment_folder=experiment_folder, episode_duration=episode_duration)
 
                     # reset the environment and the obstacle motion
+                    
+                    hidden_in = self.RNN_warmstart(params)
                     x, _ = self.env.reset(seed=self.seed, options={})
                     self.obst_motion.reset()
                     k=0
                     
-                    # reset hidden states
-                    hidden_in_VMPCrand = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
-                    for i in range(len(self.mpc.rnn.layers_list)-2)
-                    ]
-            
-                    hidden_in_QMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
-                        for i in range(len(self.mpc.rnn.layers_list)-2)
-                        ]
-                    
-                    hidden_in_VMPC = [cs.DM.zeros(self.mpc.rnn.layers_list[i+1], 1) 
-                        for i in range(len(self.mpc.rnn.layers_list)-2)
-                        ]
                     
                     self.x_prev_VMPC        = cs.DM()  
                     self.lam_x_prev_VMPC    = cs.DM()  
@@ -3091,7 +3916,22 @@ class RLclass:
             self.save_figures([(figstagecost_nice,
                    f"stagecost_smoothed.svg")],
                  experiment_folder)
+            
+            self.plot_spectral_radius(experiment_folder)
+            
+            npz_payload = {
+            "episodes": episodes,
+            "stage_cost": cost,
+            "td": TD_history,
+            "running_mean": running_mean,
+            "running_std": running_std,
+            "smoothing_window": np.array([window], dtype=int),
+            "params_history_P": params_history_P,
+            "spectral_radii_hist": np.array(self.spectral_radii_hist)
+            }
+            
+            np.savez_compressed(os.path.join(experiment_folder, "training_data.npz"), **npz_payload)
 
-            return params
+            return self.best_params
         
         

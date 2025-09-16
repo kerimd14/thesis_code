@@ -41,29 +41,29 @@ def main():
     noise_variance = 5
     decay_at_end = 0.01
     
-    num_episodes = 6000
-    episode_update_freq = 5  # frequency of updates (e.g. update every 10 episodes)
+    num_episodes = 3000
+    episode_update_freq = 3  # frequency of updates (e.g. update every 10 episodes)
     decay_rate = 1 - np.power(decay_at_end, 1 / (num_episodes / episode_update_freq))
     print(f"Computed noise decay_rate: {decay_rate:.4f}")
 
     # RL hyper-parameters
     alpha = 7e-3       # initial learning rate
-    gamma = 0.95       # discount factor
+    gamma = 0.95        # discount factor
     slack_penalty_MPC = 2e7  # penalty on slack variables in CBF constraints for the MPC stage cost
-    slack_penalty_RL = 5e4 # penalty on slack variables in CBF constraints for RL stage cost
+    slack_penalty_RL = 3e4 # penalty on slack variables in CBF constraints for RL stage cost
     
     # Learning rate scheduler
     # patience = number of epochs with no improvement after which learning rate will be reduced
-    patience = 10_000 
+    patience = 5
     lr_decay = 0.1     # factor to shrink the learning rate with after patience is reached
 
     # Episode / MPC specs
     episode_duration = 150
-    mpc_horizon = 5
+    mpc_horizon = 6
     replay_buffer_size = episode_duration * episode_update_freq  # buffer holding number of episodes (e.g. hold 10 episodes)
     
     #name of folder where the experiment is saved
-    experiment_folder = "NN_mult_move_obj_experiment_63"
+    experiment_folder = "NNSigmoid_38"
     
     #check if file exists already, if yes raise an exception
     # if os.path.exists(experiment_folder):
@@ -106,7 +106,15 @@ def main():
     {"bounds": (-4.0,  0.0), "speed": 2.3, "dir":  1},
     {"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
     {"bounds": (-2.0,  -2.0), "speed": 0.0},
+
 ]
+
+#     positions = [(-4.0, -4.25)]
+#     radii     = [1.5]
+#     modes     = ["static"]
+#     mode_params = [
+#     {"bounds": (-2.0,  -2.0), "speed": 0.0},
+# ]
     
     # ─── Build & initialize NN CBF ───────────────────────────────────────────
 
@@ -128,21 +136,21 @@ def main():
     
     # run simulation of random MPC to see how the system behaves under initial random noise
     
-    run_simulation_randomMPC(
-        params_init,
-        env,
-        experiment_folder,
-        episode_duration,
-        layers_list,
-        initial_noise_scale,
-        noise_variance,
-        mpc_horizon,
-        positions,
-        radii,
-        modes,
-        copy.deepcopy(mode_params),
-        slack_penalty_MPC,
-    )
+    # run_simulation_randomMPC(
+    #     params_init,
+    #     env,
+    #     experiment_folder,
+    #     episode_duration,
+    #     layers_list,
+    #     initial_noise_scale,
+    #     noise_variance,
+    #     mpc_horizon,
+    #     positions,
+    #     radii,
+    #     modes,
+    #     copy.deepcopy(mode_params),
+    #     slack_penalty_MPC,
+    # )
     
     # run simulation to get the initial policy before training
     stage_cost_before = run_simulation(

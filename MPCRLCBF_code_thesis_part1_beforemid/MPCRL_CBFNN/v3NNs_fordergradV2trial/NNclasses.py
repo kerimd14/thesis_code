@@ -206,7 +206,7 @@ class NN:
                 #     scale=1,
                 #     size=(fan_out, fan_in)
                 # )
-                bound = np.sqrt(6.0 / (fan_in + fan_out))
+                bound = 0.1*np.sqrt(6.0 / (fan_in + fan_out))
                 W_val = self.np_random.uniform(low=-bound, high=bound, size=(fan_out, fan_in))
             
             # biases = zero
@@ -1276,7 +1276,7 @@ class RLclass:
             
             # constrained update qp update
             solution = self.qp_solver(
-                    p=cs.vertcat(theta_vector_num, identity.flatten(), dtheta),
+                    p=cs.vertcat(theta_vector_num, identity.flatten(), -dtheta),
                     lbg=cs.vertcat(np.zeros(4), -np.inf*np.ones(theta_vector_num.shape[0]-4)),
                     ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
                     # ubx = ubx,
@@ -1351,11 +1351,11 @@ class RLclass:
 
             for i in range(1,episode_duration*num_episodes):
 
-                if i == 133*10*3000:
-                    self.alpha = self.alpha*0.01
+                # if i == 133*10*3000:
+                #     self.alpha = self.alpha*0.01
 
-                # if i == 130*10*3000:
-                #     self.alpha = self.alpha*0.01    
+                if i == 119*10*3000:
+                    self.alpha = self.alpha*0.01    
                 
                 rand = self.noise_scalingfactor*self.np_random.normal(loc=0, scale=self.noise_variance, size = (2,1))
 
@@ -1420,7 +1420,7 @@ class RLclass:
                 )['qlagrange_sens']
 
                 # first order update
-                B_update = -TD*qlagrange_numeric_jacob
+                B_update = TD*qlagrange_numeric_jacob
                 grad_temp.append(qlagrange_numeric_jacob)
                 B_update_buffer.append(B_update)
                         

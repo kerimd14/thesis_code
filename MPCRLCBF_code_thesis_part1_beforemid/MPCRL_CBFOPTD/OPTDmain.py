@@ -58,7 +58,7 @@ params_innit = {
 #seems params_innit gets overwritten
 params_original = params_innit.copy()
 
-experiment_folder_name = "v3optd_trial_10"
+experiment_folder_name = "ITWORKS!!!!!NOTTTTTTTTTTTT"
 
 # 
 # cs.DM([

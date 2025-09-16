@@ -13,7 +13,7 @@ class NN:
         """
         Simple 1D-input neural net with strictly positive weights via reparam.
 
-        layers_size: list with input, hidden, output dims, e.g. [1, 8, 8, 1]
+        layers_size: list with input, hidden, output dims, e.g. [5, 8, 8, 1]
         seed: RNG seed for parameter initialization
         """
         self.layers_size = layers_size
@@ -21,14 +21,67 @@ class NN:
         self.np_random = np.random.default_rng(seed)
 
         # trainable CasADi symbols
-        self.phis = []   # unconstrained parameters, one per weight matrix
+        self.weights = []   # unconstrained parameters, one per weight matrix
         self.biases = [] # biases
         self.activations = []
+        
+        mu_states = cs.DM([-0.97504422, -0.64636289, 0.05090653, 0.05091322])
+        sigma_states = cs.DM([ 1.39463336,  1.18101312, 0.0922252, 0.09315792])
+        mu_h = 26.0464150055885
+        sigma_h = 11.6279296875
+
+        # store as column DMs
+        self.mu_states = cs.DM(mu_states).reshape((4,1))
+        self.sigma_states = cs.DM(sigma_states).reshape((4,1))
+        self.mu_h = float(mu_h)
+        self.sigma_h = float(sigma_h)
 
         self.build_network()
+        
+    def normalization_z(self, nn_input):
+        """
+        nn_input: MX/DM of shape (5,1) -> [x(4), h]
+        Returns normalized [x_norm(4), h_norm], same shape.
+        """
+        
+        def scale_centered(z, zmin, zmax, eps=1e-12):
+            return 2 * (z - zmin) / (zmax - zmin + eps) - 1
+        x = nn_input[:4]
+        h = nn_input[4]
+        
+        Xmax, Ymax = 5, 5
+        Vxmax, Vymax = 5, 5
+        
+        x_min = cs.DM([-Xmax, -Ymax, -Vxmax, -Vymax])
+        x_max = cs.DM([   0.,    0.,  Vxmax,  Vymax ])
+        x_norm = (x-x_min)/(x_max-x_min + 1e-9)
+        # x_norm = scale_centered(x, x_min, x_max)
+        
+        
+        # x_norm = cs.fmin(cs.fmax(x_norm, 0), 1)
 
-    def leaky_relu(self, x, alpha=0.1):
+        # x_norm = (x - self.mu_states) / self.sigma_states
+        pos = cs.DM([-2, -2.25])
+        r = cs.DM(1.5)
+        hx_list = []
+        for (cx,cy) in [(0,0), (-5,0), (0,-5), (-5,-5)]:
+            hx = (cx - (pos[0]))**2 + (cy - (pos[1]))**2 - r**2
+            hx_list.append(hx)
+        h_min = 0
+        h_max = max(hx_list)
+        h_norm = (h-h_min)/(h_max-h_min + 1e-9)
+        # h_norm = scale_centered(h, h_min, h_max)
+        
+        # h_norm = cs.fmin(cs.fmax(h_norm, 0), 1)
+        
+        #h_norm = (h - self.mu_h) / self.sigma_h
+
+        return cs.vertcat(x_norm, h_norm)
+
+    def leaky_relu(self, x, alpha=0.05):
         return cs.fmax(x, 0) + alpha * cs.fmin(x, 0)
+    def relu(self, x):
+        return cs.fmax(x, 0)
     
     def tanh(self, x):
         return cs.tanh(x)
@@ -39,94 +92,108 @@ class NN:
 
     def build_network(self):
         """
-        Construct phi_i, b_i symbols and choose activations.
-        Weights W_i = exp(phi_i) ensure W_i > 0.
+        Construct weights_i, b_i symbols and choose activations.
+        Weights W_i = exp(weights_i) ensure W_i > 0.
         """
-        for i in range(len(self.layers_size)-1):
+        L = len(self.layers_size) - 1
+        for i in range(L):
             in_dim = self.layers_size[i]
             out_dim = self.layers_size[i+1]
-            phi_i = cs.MX.sym(f"phi{i}", out_dim, in_dim)
+            weights_i = cs.MX.sym(f"weights{i}", out_dim, in_dim)
             b_i   = cs.MX.sym(f"b{i}",   out_dim, 1)
-            self.phis.append(phi_i)
+            self.weights.append(weights_i)
             self.biases.append(b_i)
-
-            self.activations.append(self.leaky_relu)
-            # self.activations.append(self.tanh)
+            
+            # self.activations.append(self.leaky_relu)
+            self.activations.append(self.relu)
         # derive weight matrices
-        self.weights = [cs.exp(phi) for phi in self.phis]
 
-    def forward(self, h_input):
+    def forward(self, input):
         """
         Forward pass through the network.
         h_input: MX of shape (1,1) representing the scalar h(x).
         Returns MX of shape (1,1).
         """
-        a = h_input
+        a = self.normalization_z(input)
         for W, b, act in zip(self.weights, self.biases, self.activations):
-            z = W @ a + b
+            # z = cs.exp(W) @ a + b
+            # z = cs.log(1 + cs.exp(W))@ a + b
+            z = cs.fabs(W) @ a + b
             a = act(z)
         return a
 
     def get_flat_parameters(self):
         """
-        Flatten phis and biases into a single column vector.
+        Flatten weights and biases into a single column vector.
         Useful for passing into solvers.
         """
-        phi_list  = [cs.reshape(phi, -1, 1) for phi in self.phis]
+        weights_list  = [cs.reshape(weights, -1, 1) for weights in self.weights]
         bias_list = [cs.reshape(b,   -1, 1) for b   in self.biases]
-        return cs.vertcat(*(phi_list + bias_list))
+        return cs.vertcat(*(weights_list + bias_list))
 
     def initialize_parameters(self):
         """
-        Sample initial numeric values for phi and biases.
-        phi_i ~ N(0, sqrt(2/fan_in)), b_i = 0.
+        Sample initial numeric values for weights and biases.
+        weights_i ~ N(0, sqrt(2/fan_in)), b_i = 0.
         Returns:
           flat_params: casadi.DM of stacked initial values
-          raw_shapes: tuple (phi_vals, bias_vals) lists for reshaping
+          raw_shapes: tuple (weights_vals, bias_vals) lists for reshaping
         """
-        phi_vals = []
+        weights_vals = []
         bias_vals = []
+        
+        neg_slope = 0.05
+        gain_leaky = np.sqrt(2.0 / (1.0 + neg_slope**2))  # around 1.414
+
         for i in range(len(self.layers_size)-1):
             fan_in = self.layers_size[i]
             fan_out = self.layers_size[i+1]
+            
+            bound = 10*np.sqrt(6.0 / fan_in) #/ gain_leaky
 
 
-            # bound_low = np.sqrt(6.0 / fan_in)
-            # bound_high = np.sqrt(6.0 / fan_out)
-            # phi_i = self.np_random.uniform(low= -bound_low, high = bound_high, size=(self.layers_size[i+1], fan_in))
-            # phi_i = np.log(phi_i_candidate) 
-            # print(f"phi_i_candidate: {phi_i_candidate}")
-            # print(f"phi_i: {phi_i}")
-            sigma2 = np.log(1 + 2.0/fan_in)
-            # mu     = -0.5 * sigma2
-            mu     = -3 * sigma2
-            sigma  = 0.01*np.sqrt(sigma2)
-            # sample phi ~ N(mu, sigma²)
-            phi_i = self.np_random.normal(loc=mu, scale=sigma, size=(fan_out, fan_in))
+            bound_low = np.sqrt(6.0 / fan_in)
+            bound_high = np.sqrt(6.0 / fan_out)
+            weights_i = self.np_random.uniform(low= -bound, high = bound, size=(fan_out, fan_in))
+            # weights_i = np.log(weights_i_candidate) 
+            # print(f"weights_i_candidate: {weights_i_candidate}")
+            # print(f"weights_i: {weights_i}")
+            # sigma2 = np.log(1 + 2.0/fan_in)
+            # # mu     = -0.5 * sigma2
+            # mu     = -3 * sigma2
+            # sigma  = 0.01*np.sqrt(sigma2)
+            # # sample weights ~ N(mu, sigma²)
+            # weights_i = self.np_random.normal(loc=mu, scale=sigma, size=(fan_out, fan_in))
 
             b_i   = np.zeros((self.layers_size[i+1], 1))
-            phi_vals.append(phi_i.reshape(-1, 1))
+            weights_vals.append(weights_i.reshape(-1, 1))
             bias_vals.append(b_i.reshape(-1,1))
-        flat = np.vstack(phi_vals + bias_vals)
-        return cs.DM(flat), phi_vals, bias_vals
+        flat = np.vstack(weights_vals + bias_vals)
+        return cs.DM(flat), weights_vals, bias_vals
 
     def create_kappa_function(self):
         """
         Build a CasADi Function 'kappa' such that:
-          kappa(h) = κ'(h) - κ'(0),
+          kappa(x,h) = κ'(x,h) - κ'(x,0),
         with κ' strictly increasing (positive weights) and kappa(0)=0.
 
-        Inputs: h , then phi params, then biases
+        Inputs: h , then weights params, then biases
         Output: kappa(h)
         """
+        x = cs.MX.sym('x', 4, 1)
         h = cs.MX.sym('h', 1, 1)
-        y_raw = self.forward(h)
-        y0 = self.forward(cs.MX.zeros(1,1))
+        
+        input_raw = cs.vertcat(x, h)
+        input_0   = cs.vertcat(x, cs.MX.zeros(1,1))
+        
+        y_raw = self.forward(input_raw)
+        y0 = self.forward(input_0)
         y  = y_raw - y0
-        inputs = [h] + self.phis + self.biases
+        #nputs = [h] + self.weights + self.biases
+        inputs = [x, h] + self.weights + self.biases
         return cs.Function('kappa', inputs, [y],
-                           ['h']
-                           + [f'phi{i}' for i in range(len(self.phis))]
+                           ['x', 'h']
+                           + [f'weights{i}' for i in range(len(self.weights))]
                            + [f'b{i}'   for i in range(len(self.biases))],
                            ['kappa'])
     
@@ -136,55 +203,20 @@ class NN:
           kappa(h) = κ'(h) - κ'(0),
         with κ' strictly increasing (positive weights) and kappa(0)=0.
 
-        Inputs: h , then phi params, then biases
+        Inputs: h , then weights params, then biases
         Output: kappa(h)
         """
+        x = cs.MX.sym('x', 4, 1)
         h = cs.MX.sym('h', 1, 1)
-        y_raw = self.forward(h)
-        y0 = self.forward(cs.MX.zeros(1,1))
-        y  = y_raw - y0
-        return cs.Function('kappa', [h, self.get_flat_parameters()], [y])
-    
-
-
-    # def plot_kappa(self, h_vals, params, experiment_folder):
-    #     """
-    #     Plot kappa function and save to file.
-    #     """
-
-
-    #     h_vals = np.linspace(-5, 10, 200).reshape(-1, 1)
-
-    #     list, phi_vals_np, bias_vals_np = self.initialize_parameters()
-
-    #     phi_vals = [cs.DM(p.reshape(out_dim, in_dim))
-    #             for (p, in_dim, out_dim) in zip(
-    #                     phi_vals_np,
-    #                     self.layers_size[:-1],
-    #                     self.layers_size[1:])]
-    #     bias_vals = [cs.DM(b.reshape(out_dim, 1))
-    #              for (b, out_dim) in zip(
-    #                      bias_vals_np,
-    #                      self.layers_size[1:])]
-
         
-    #     create_kappa_function = self.create_kappa_function()
-
-    #     kappa_vals = []
-
-    #     for h in h_vals:
-    #         kappa = self.numerical_forw_kappa_function(h, params["nn_params"])
-    #         kappa_vals.append(kappa[0][0])
-    #     kappa_vals = np.array(kappa_vals).reshape(-1, 1)           
-
-    #     plt.figure()
-    #     plt.plot(h_vals.reshape(-1), kappa_vals)
-    #     plt.xlabel('h')
-    #     plt.ylabel('kappa(h)')
-    #     plt.title('Kappa Function')
-    #     plt.grid()
-    #     plt.savefig(os.path.join(experiment_folder, 'kappa_function.png'))
-    #     plt.show()
+        input_raw = cs.vertcat(x, h)
+        input_0   = cs.vertcat(x, cs.MX.zeros(1,1))
+        
+        y_raw = self.forward(input_raw)
+        y0 = self.forward(input_0)
+        y  = y_raw - y0
+        
+        return cs.Function('kappa', [x, h, self.get_flat_parameters()], [y])
     
 
 
@@ -261,6 +293,20 @@ class MPC:
             [dt, 0], 
             [0, dt]
         ])
+        
+        self.A_cont = np.array([
+            [0, 0, 1, 0], 
+            [0, 0, 0, 1], 
+            [0, 0, 0, 0], 
+            [0, 0, 0, 0]
+        ])
+
+        self.B_cont = np.array([
+            [0, 0], 
+            [0, 0], 
+            [1, 0], 
+            [0, 1]
+        ])
 
         self.Q = np.diag([10, 10, 10, 10])
         
@@ -280,7 +326,7 @@ class MPC:
         self.V_sym = cs.MX.sym("V0")
 
         #weight on the slack variables
-        self.weight_cbf = cs.DM([8e6])
+        self.weight_cbf = cs.DM([2e7])
 
 
         # decision variables
@@ -297,10 +343,16 @@ class MPC:
         # defining stuff for CBF
         x_new  = self.A @ self.x_sym + self.B @ self.u_sym 
         self.dynamics_f = cs.Function('f', [self.x_sym, self.u_sym], [x_new], ['x','u'], ['ode'])
+        
+        x_new_cont = self.A_cont @ self.x_sym + self.B_cont @ self.u_sym 
+        
+        self.dynamics_f_cont = cs.Function('f', [self.x_sym, self.u_sym], [x_new_cont], ['x','u'], ['ode_cont'])
 
-        h = (self.x_sym[0] - (self.pos[0]))**2 + (self.x_sym[1] - (self.pos[1]))**2 - self.r**2
+        hx = (self.x_sym[0] - (self.pos[0]))**2 + (self.x_sym[1] - (self.pos[1]))**2 - self.r**2
+        
+        self.grad_h = cs.gradient(hx, self.x_sym)
 
-        self.h_func = cs.Function('h', [self.x_sym], [h], ['x'], ['cbf'])
+        self.h_func = cs.Function('h', [self.x_sym], [hx], ['x'], ['cbf'])
 
         
         # intilization of the Neural Network
@@ -309,77 +361,6 @@ class MPC:
 
         # self.get_kappa_fn = self.nn.get_kappa_fn()
         self.kappa_fn = self.nn.create_kappa_function()
-
-
-    def dcbf(self,
-        h, x, u, dynamics, alphas,
-    ) -> cs.Function:
-        r"""Discrete-time Control Barrier Function (DCBF) for the given constraint ``h`` and
-        system with dynamics ``dynamics``. This method constructs a DCBF for the constraint
-        :math:`h(x) \geq 0` using the given system's dynamics :math:`x_{+} = f(x, u)`. Here,
-        :math:`x_{+}` is the next state after applying control input :math:`u`, and
-        :math:`f` is the dynamics function ``dynamics``.
-
-        The method can also compute a High-Order (HO) DCBF by passing more than one class
-        :math:`\mathcal{K}` functions ``alphas``.
-
-        As per [1]_, the HO-DCBF :math:`\phi_m` of degree :math:`m` is recursively found as
-
-        .. math::
-            \phi_m(x_"V0") = \phi_{m-1}(x_{k+1}) - \phi_{m-1}(x_k) + \alpha_m(\phi_{m-1}(x_k))
-
-        and should be imposed as the constraint :math:`\phi_m(x_k) \geq 0`.
-
-        Parameters
-        ----------
-        h : callable
-            The constraint function for which to build the DCBF. It must be of the signature
-            :math:`x \rightarrow h(x)`.
-        x : casadi SX or MX
-            The state vector variable :math:`x`.
-        u : casadi SX or MX
-            The control input vector variable :math:`u`.
-        dynamics : callable
-            The dynamics function :math:`f` with signature :math:`x,u \rightarrow f(x, u)`.
-        alphas : iterable of callables
-            An iterable of class :math:`\mathcal{K}` functions :math:`\alpha_m` for
-            the HO-DCBF. The length of the iterable determines the degree of the HO-DCBF.
-
-        Returns
-        -------
-        casadi SX or MX
-            Returns the HO-DCBF function :math:`\phi_m` as a symbolic variable that is
-            function of the provided ``x`` and ``u``.
-
-        References
-        ----------
-        .. [1] Yuhang Xiong, Di-Hua Zhai, Mahdi Tavakoli, Yuanqing Xia. Discrete-time
-        control barrier function: High-order case and adaptive case. *IEEE Transactions
-        on Cybernetics*, 53(5), 3231-3239, 2022.
-
-        Examples
-        --------
-        >>> import casadi as cs
-        >>> A = cs.SX.sym("A", 2, 2)
-        >>> B = cs.SX.sym("B", 2, 1)
-        >>> x = cs.SX.sym("x", A.shape[0], 1)
-        >>> u = cs.SX.sym("u", B.shape[1], 1)
-        >>> dynamics = lambda x, u: A @ x + B @ u
-        >>> M = cs.SX.sym("M")
-        >>> c = cs.SX.sym("c")
-        >>> gamma = cs.SX.sym("gamma")
-        >>> alphas = [lambda z: gamma * z]
-        >>> h = lambda x: M - c * x[0]  # >= 0
-        >>> cbf = dcbf(h, x, u, dynamics, alphas)
-        >>> print(cbf)
-        """
-        x_next = dynamics(x, u)
-        phi = h(x)
-        for alpha in alphas:
-            phi_next = cs.substitute(phi, x, x_next)
-            phi = phi_next - phi + alpha(phi)
-        return phi
-    
 
     def state_const(self):
 
@@ -399,8 +380,10 @@ class MPC:
     
     
     def cbf_func(self):
-
-        cbf = self.dcbf(self.h_func, self.x_sym, self.u_sym, self.dynamics_f, [lambda y: self.kappa_fn(y, *self.nn.phis, *self.nn.biases)])
+        x_next = self.dynamics_f_cont(self.x_sym, self.u_sym)
+        hx = self.h_func(self.x_sym)
+        Lf_h = self.grad_h.T @ x_next#cs.dot(self.grad_h, x_next)
+        cbf = Lf_h + self.kappa_fn(self.x_sym, hx, *self.nn.weights, *self.nn.biases)
 
         return cs.Function('cbff', [self.x_sym, self.u_sym, self.nn.get_flat_parameters()], [cbf], ['x','u', 'kappa params'], ['cbff'])
 
@@ -414,7 +397,7 @@ class MPC:
         cbf_const_list = []
         for k in range(self.horizon):
 
-            cbf_const_list.append(cbf_func(self.X_sym[:,k], self.U_sym[:,k], self.nn.get_flat_parameters()) + self.S_sym[:,k]) 
+            cbf_const_list.append(cbf_func(self.X_sym[:,k], self.U_sym[:,k], self.nn.get_flat_parameters()) + self.S_sym[:,k]) #+ self.S_sym[:,k] 
 
         self.cbf_const_list = cs.vertcat(*cbf_const_list)
         print(f"here is the self.cbf_constlist; {self.cbf_const_list}")
@@ -507,10 +490,10 @@ class MPC:
             "eval_errors_fatal": True,
             "error_on_fail": False,
             "calc_lam_p": True,
-            "fatrop": {"max_iter": 500, "print_level": 0},
+            "ipopt": {"max_iter": 500, "print_level": 0},
         }
 
-        MPC_solver = cs.nlpsol("solver", "fatrop", nlp, opts)
+        MPC_solver = cs.nlpsol("solver", "ipopt", nlp, opts)
 
         # if MPC_solver.stats()["success"] == False:
         #         print("MPC_SOLVER NO SLACK FAILED")
@@ -551,10 +534,10 @@ class MPC:
             "eval_errors_fatal": True,
             "error_on_fail": False,
             "calc_lam_p": True,
-            "fatrop": {"max_iter": 500, "print_level": 0},
+            "ipopt": {"max_iter": 500, "print_level": 0},
         }
 
-        MPC_solver = cs.nlpsol("solver", "fatrop", nlp, opts)
+        MPC_solver = cs.nlpsol("solver", "ipopt", nlp, opts)
 
 
         # if MPC_solver.stats()["success"] == False:
@@ -599,10 +582,10 @@ class MPC:
             "eval_errors_fatal": True,
             "error_on_fail": False,
             "calc_lam_p": False,
-            "fatrop": {"max_iter": 500, "print_level": 0},
+            "ipopt": {"max_iter": 500, "print_level": 0},
         }
 
-        MPC_solver = cs.nlpsol("solver", "fatrop", nlp, opts)
+        MPC_solver = cs.nlpsol("solver", "ipopt", nlp, opts)
 
         print("hey")
 
@@ -641,7 +624,7 @@ class MPC:
         # construct lower bound here 
         lagrange1 = lagrange_mult_x_lb_sym.T @ (opt_solution - lbx) #positive @ negative
         lagrange2 = lagrange_mult_x_ub_sym.T @ (ubx - opt_solution)  # positive @ negative                                
-        lagrange3 = lagrange_mult_g_sym.T @ cs.vertcat(self.state_const_list, self.cbf_const_list) # opposite signs
+        lagrange3 = lagrange_mult_g_sym.T @ cs.vertcat(self.state_const_list, -self.cbf_const_list) # opposite signs
 
  
         theta_vector = cs.vertcat(self.P_diag, self.nn.get_flat_parameters())
@@ -801,6 +784,20 @@ class RLclass:
             self.square_avg = np.zeros(theta_vector_num.shape[0])
             self.grad_avg = np.zeros(theta_vector_num.shape[0])
             self.momenum_buffer = np.zeros(theta_vector_num.shape[0])
+            
+            
+                             #warmstart variables
+            self.x_prev_VMPC        = cs.DM()  
+            self.lam_x_prev_VMPC    = cs.DM()  
+            self.lam_g_prev_VMPC    = cs.DM()  
+
+            self.x_prev_QMPC        = cs.DM()  
+            self.lam_x_prev_QMPC    = cs.DM()  
+            self.lam_g_prev_QMPC    = cs.DM()  
+
+            self.x_prev_VMPCrandom  = cs.DM()  
+            self.lam_x_prev_VMPCrandom = cs.DM()  
+            self.lam_g_prev_VMPCrandom = cs.DM()
         
         
         def save_figures(self, figures, experiment_folder, save_in_subfolder=False):
@@ -1003,6 +1000,9 @@ class RLclass:
             R_flat = cs.reshape(params["R"], -1, 1)
 
             solution = self.solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, Q_flat, R_flat,  params["nn_params"]),
+                x0    = self.x_prev_VMPC,
+                lam_x0 = self.lam_x_prev_VMPC,
+                lam_g0 = self.lam_g_prev_VMPC,
                 ubx=ubx,  
                 lbx=lbx,
                 ubg=ubg,
@@ -1011,6 +1011,10 @@ class RLclass:
 
             #extract solution from solver 
             u_opt = solution["x"][self.ns * (self.horizon+1):self.ns * (self.horizon+1) + self.na]
+            
+            self.x_prev_VMPC     = solution["x"]
+            self.lam_x_prev_VMPC = solution["lam_x"]
+            self.lam_g_prev_VMPC = solution["lam_g"]
 
 
             return u_opt, solution["f"]
@@ -1040,6 +1044,9 @@ class RLclass:
 
 
             solution = self.solver_inst_random(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, Q_flat, R_flat, params["nn_params"], rand),
+                x0    = self.x_prev_VMPCrandom,
+                lam_x0 = self.lam_x_prev_VMPCrandom,
+                lam_g0 = self.lam_g_prev_VMPCrandom,
                 ubx=ubx,  
                 lbx=lbx,
                 ubg=ubg,
@@ -1047,6 +1054,10 @@ class RLclass:
             )
 
             u_opt = solution["x"][self.ns * (self.horizon+1):self.ns * (self.horizon+1) + self.na]
+            
+            self.x_prev_VMPCrandom = solution["x"]
+            self.lam_x_prev_VMPCrandom = solution["lam_x"]
+            self.lam_g_prev_VMPCrandom = solution["lam_g"]
 
             return u_opt
 
@@ -1071,6 +1082,9 @@ class RLclass:
             R_flat = cs.reshape(params["R"], -1, 1)
 
             solution = self.solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], params["V0"], P_diag, Q_flat, R_flat, params["nn_params"]),
+                x0    = self.x_prev_QMPC,
+                lam_x0 = self.lam_x_prev_QMPC,
+                lam_g0 = self.lam_g_prev_QMPC,
                 ubx=ubx,  
                 lbx=lbx,
                 ubg=ubg,
@@ -1082,6 +1096,10 @@ class RLclass:
             lam_lbx = -cs.fmin(solution["lam_x"], 0)
             lam_ubx = cs.fmax(solution["lam_x"], 0)
             lam_p = solution["lam_p"]
+            
+            self.lam_g_prev_QMPC = solution["lam_g"]
+            self.x_prev_QMPC = solution["x"]
+            self.lam_x_prev_QMPC = solution["lam_x"]
 
             return solution["x"], solution["f"], lagrange_mult_g, lam_lbx, lam_ubx, lam_p
             
@@ -1091,11 +1109,14 @@ class RLclass:
             # same as the MPC ones
             Qstage = np.diag([10, 10, 10, 10])
             Rstage = np.diag([1, 1])
+            hx=self.mpc.h_func(x)
+
+            violations = np.clip(-hx, 0, None)
 
             state = x
             return (
                 state.T @ Qstage @ state
-                + action.T @ Rstage @ action
+                + action.T @ Rstage @ action + np.sum(2e3*violations)
             )
         
         def evaluation_step(self, params, experiment_folder, episode_duration):
@@ -1207,7 +1228,7 @@ class RLclass:
             # print(f"before updates : {theta_vector_num}")
 
             # alpha_vec is resposible for the updates
-            alpha_vec = cs.vertcat(self.alpha*np.ones(3), self.alpha, self.alpha, self.alpha*np.ones(theta_vector_num.shape[0]-5)*1e-2)
+            alpha_vec = cs.vertcat(self.alpha*np.ones(3), self.alpha, self.alpha*np.ones(theta_vector_num.shape[0]-4)*1e-2)
             # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]-2), self.alpha,self.alpha*1e-5)
             
             print(f"B_update_avg:{B_update_avg}")
@@ -1288,6 +1309,20 @@ class RLclass:
             k = 0
             self.error_happened = False
             self.eval_count = 1
+            
+               
+            #warmstart variables
+            self.x_prev_VMPC        = cs.DM()  
+            self.lam_x_prev_VMPC    = cs.DM()  
+            self.lam_g_prev_VMPC    = cs.DM()  
+
+            self.x_prev_QMPC        = cs.DM()  
+            self.lam_x_prev_QMPC    = cs.DM()  
+            self.lam_g_prev_QMPC    = cs.DM()  
+
+            self.x_prev_VMPCrandom  = cs.DM()  
+            self.lam_x_prev_VMPCrandom = cs.DM()  
+            self.lam_g_prev_VMPCrandom = cs.DM()
 
             for i in range(1,episode_duration*num_episodes):
                 
@@ -1337,7 +1372,7 @@ class RLclass:
 
                 U = solution[self.ns * (self.horizon+1):self.na * (self.horizon) + self.ns * (self.horizon+1)] 
                 X = solution[:self.ns * (self.horizon+1)] 
-                S = solution[self.na * (self.horizon) + self.ns * (self.horizon+1): :self.na * (self.horizon) + self.ns * (self.horizon+1) +self.horizon]
+                S = solution[self.na * (self.horizon) + self.ns * (self.horizon+1):self.na * (self.horizon) + self.ns * (self.horizon+1) +self.horizon]
             
                 qlagrange_numeric_jacob=  self.qlagrange_fn_jacob(
                     A_sym=params["A"],
@@ -1392,6 +1427,18 @@ class RLclass:
 
                     x, _ = self.env.reset(seed=self.seed, options={})
                     k=0
+                    
+                    self.x_prev_VMPC        = cs.DM()  
+                    self.lam_x_prev_VMPC    = cs.DM()  
+                    self.lam_g_prev_VMPC    = cs.DM()  
+
+                    self.x_prev_QMPC        = cs.DM()  
+                    self.lam_x_prev_QMPC    = cs.DM()  
+                    self.lam_g_prev_QMPC    = cs.DM()  
+
+                    self.x_prev_VMPCrandom  = cs.DM()  
+                    self.lam_x_prev_VMPCrandom = cs.DM()  
+                    self.lam_g_prev_VMPCrandom = cs.DM()
 
                     print("reset")
 

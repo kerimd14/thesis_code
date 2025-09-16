@@ -87,15 +87,22 @@ params_innit = {
 #     {"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
 #     # {"bounds": (-2.0,  -2.0), "speed": 0.0, "dir": -1},
 # ]
-positions = [(-2, -2.25)]
+# positions = [(-2, -2.25)]
 
 
-radii     = [1.5]  
+# radii     = [1.5]  
 
-modes       = ["static"]  # one obstacle, static
+# modes       = ["static"]  # one obstacle, static
 
-mode_params = [{'bounds': (-5.0, 1.0), 'speed': 0}]
-
+# mode_params = [{'bounds': (-5.0, 1.0), 'speed': 0}]
+positions = [(-2.0, -1.5), (-3.0, -3.3), (-2.0, 0.0)]
+radii     = [0.7, 0.7, 1]
+modes     = ["step_bounce", "step_bounce", "static"]
+mode_params = [
+{"bounds": (-4.0,  0.0), "speed": 2.3, "dir":  1},
+{"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
+{"bounds": (-2.0,  -2.0), "speed": 0.0},
+]
 # positions = [(-2.0, -1.5), (-3.0, -3.0), (-2.0, 0.0)]
 # positions = [(-3.0, -1.5), (-2.0, -3.0)]
 # radii     = [0.72, 0.72]
@@ -145,7 +152,7 @@ params_innit["nn_params"] = list
 #seems params_innit gets overwritten
 params_original = params_innit.copy() 
 
-experiment_folder_name = "firstpart_opt_experiment"
+experiment_folder_name = "secondpart_opt_experiment_2"
 
 #WATCH OUT --> since mode_params was a dict what was happening is that the values of it kept getting changed
 
