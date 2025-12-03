@@ -1218,7 +1218,13 @@ class MPC:
         )
 
         # CBF slack (or violation) over objects and time
-        cbf_cost_L1 = self.slack_penalty_MPC_L1 * sum(
+        # cbf_cost_L1 = (self.slack_penalty_MPC_L1/(self.horizon+self.m)) * sum(
+        # self.S_sym[m, k]
+        # for m in range(self.m)
+        # for k in range(self.horizon)
+        # )
+        
+        cbf_cost_L1 =  self.slack_penalty_MPC_L1*sum(
         self.S_sym[m, k]
         for m in range(self.m)
         for k in range(self.horizon)
@@ -1467,9 +1473,9 @@ class MPC:
         # if self.cbf_const_list didnt have a minus infront it would be g(x)>=0, but the according lagrangians wouldnt hold
         
  
-        # theta_vector = cs.vertcat(self.P_diag, self.rnn.get_flat_parameters())
+        theta_vector = cs.vertcat(self.P_diag, self.rnn.get_flat_parameters())
         # theta_vector = cs.vertcat(self.P_diag, self.Q_diag, self.R_diag, self.rnn.get_flat_parameters())
-        theta_vector = cs.vertcat(self.rnn.get_flat_parameters())
+        # theta_vector = cs.vertcat(self.rnn.get_flat_parameters())
 
         self.theta = theta_vector
 
@@ -1678,10 +1684,10 @@ class RLclass:
 
             
             # ADAM
-            # theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), self.params_innit["rnn_params"])
+            theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), self.params_innit["rnn_params"])
             # theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), self.params_innit["rnn_params"])
             # theta_vector_num = cs.vertcat(cs.diag(self.params_innit["P"]), cs.diag(self.params_innit["Q"]),  cs.diag(self.params_innit["R"]),  self.params_innit["rnn_params"])
-            theta_vector_num = cs.vertcat(self.params_innit["rnn_params"])
+            # theta_vector_num = cs.vertcat(self.params_innit["rnn_params"])
             self.exp_avg = np.zeros(theta_vector_num.shape[0])
             self.exp_avg_sq = np.zeros(theta_vector_num.shape[0])
             self.adam_iter = 1
@@ -2965,35 +2971,9 @@ class RLclass:
             return (
                 state.T @ Qstage @ state
                 + action.T @ Rstage @ action 
-                + self.slack_penalty_RL_L1*(np.sum(S)/(self.horizon+self.mpc.rnn.obst.obstacle_num))
+                + self.slack_penalty_RL_L1*(np.sum(S))#self.slack_penalty_RL_L1*(np.sum(S)/(self.horizon+self.mpc.rnn.obst.obstacle_num))
                 + 0.5 * self.slack_penalty_RL_L2* (np.sum(S**2) / (self.horizon+self.mpc.rnn.obst.obstacle_num)) 
                 + np.sum(self.violation_penalty*violations)
-            )
-            
-        def stage_cost_alt(self, action, state):
-            """
-            Computes the stage cost : L(s,a).
-            
-            Args:
-                action: (na,):
-                    Control action vector.
-                state: (ns,):
-                    Current state vector of the system
-                S: (m*(horizon+1),):
-                    Slack variables for the MPC problem, used in the stage cost.
-                    Slacks that were used for relaxing CBF constraints in the MPC problem.
-            
-            Returns:
-                float:
-                    The computed stage cost value.
-            """
-            # same as the MPC ones
-            Qstage = np.diag([10, 10, 10, 10])
-            Rstage = np.diag([1, 1])
-                  
-            return (
-                state.T @ Qstage @ state
-                + action.T @ Rstage @ action 
             )
         
         def evaluation_step(self, params, experiment_folder, episode_duration):
@@ -3074,7 +3054,6 @@ class RLclass:
             # self.x_prev_VMPC        = cs.DM()  
             # self.lam_x_prev_VMPC    = cs.DM()  
             # self.lam_g_prev_VMPC    = cs.DM()  
-            stage_cost_eval_alt = []
 
             for i in range(episode_duration):
                 action, _, hidden_in, alpha, plan_xy, _ = self.V_MPC(params=params, x=state, 
@@ -3094,7 +3073,7 @@ class RLclass:
                 
                 action = cs.fmin(cs.fmax(cs.DM(action), -CONSTRAINTS_U), CONSTRAINTS_U)
                 stage_cost_eval.append(self.stage_cost(action, state, self.S_VMPC, hx))
-                stage_cost_eval_alt.append(self.stage_cost_alt(action, state))
+                
                 # print(f"evaluation step {i}, action: {action}, slack: {np.sum(5e4*self.S_VMPC)}")
                 state, _, done, _, _ = self.env.step(action)
                 states_eval.append(state)
@@ -3120,8 +3099,7 @@ class RLclass:
             slacks_eval = np.stack(slacks_eval, axis=0)
             plans_eval = np.array(plans_eval) 
             
-            sum_stage_cost = np.sum(stage_cost_eval) 
-            sum_stage_cost_alt = np.sum(stage_cost_eval_alt)
+            sum_stage_cost = np.sum(stage_cost_eval)
             print(f"Stage Cost: {sum_stage_cost}")
 
             figstates=plt.figure()
@@ -3256,7 +3234,7 @@ class RLclass:
             #     trail_len=self.horizon      # fade the tail to last H
             # )
             
-            out_gif = os.path.join(target_folder, f"system_and_obstaclewithobstpred_{self.eval_count}_SC_{sum_stage_cost_alt}.gif")
+            out_gif = os.path.join(target_folder, f"system_and_obstaclewithobstpred_{self.eval_count}_SC_{sum_stage_cost}.gif")
             
             self.make_system_obstacle_animation_v3(
                 states_eval[:T_pred],
@@ -3291,8 +3269,8 @@ class RLclass:
 
             #vector of parameters which are differenitated with respect to
             # theta_vector_num = cs.vertcat(P_diag, Q_diag, R_diag, params["rnn_params"])
-            # theta_vector_num = cs.vertcat(P_diag, params["rnn_params"])
-            theta_vector_num = cs.vertcat(params["rnn_params"])
+            theta_vector_num = cs.vertcat(P_diag, params["rnn_params"])
+            # theta_vector_num = cs.vertcat(params["rnn_params"])
 
             identity = np.eye(theta_vector_num.shape[0])
 
@@ -3300,8 +3278,8 @@ class RLclass:
 
             # alpha_vec is resposible for the updates
             # alpha_vec = cs.vertcat(self.alpha*np.ones(self.ns+self.ns+self.na)*5e1, self.alpha*np.ones(theta_vector_num.shape[0]-(self.ns+self.ns+self.na))*1e-2)
-            # alpha_vec = cs.vertcat(self.alpha*np.ones(self.ns-2)*1e1, self.alpha*np.ones(self.ns-2)*1e1, self.alpha*np.ones(theta_vector_num.shape[0]-(self.ns))*1e-2)
-            alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]))
+            alpha_vec = cs.vertcat(self.alpha*np.ones(2), self.alpha*np.ones(2), self.alpha*np.ones(theta_vector_num.shape[0]-(self.ns))*1e-2)
+            # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]))
             # alpha_vec = cs.vertcat(self.alpha*np.ones(theta_vector_num.shape[0]-2), self.alpha,self.alpha*1e-5)
             
             print(f"B_update_avg:{B_update_avg}")
@@ -3330,10 +3308,10 @@ class RLclass:
             solution = self.qp_solver(
                     p=cs.vertcat(theta_vector_num, -dtheta), #OMG DO I PUT MINUES HERE?????????
                     # lbg=cs.vertcat(np.zeros(self.ns+self.ns+self.na), -np.inf*np.ones(theta_vector_num.shape[0]-(self.ns+self.ns+self.na))),
-                    # lbg=cs.vertcat(np.zeros(self.ns), -np.inf*np.ones(theta_vector_num.shape[0]-(self.ns))),
-                    # ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
-                    lbg=cs.vertcat(-np.inf*np.ones(theta_vector_num.shape[0])),
+                    lbg=cs.vertcat(np.zeros(self.ns), -np.inf*np.ones(theta_vector_num.shape[0]-(self.ns))),
                     ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
+                    # lbg=cs.vertcat(-np.inf*np.ones(theta_vector_num.shape[0])),
+                    # ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
                     # ubx = ubx,
                     # lbx = lbx
                 )
@@ -3352,16 +3330,16 @@ class RLclass:
             Q_diag_shape = self.ns*1
             R_diag_shape = self.na*1
             #constructing the diagonal posdef P matrix 
-            # P_posdef = cs.diag(theta_vector_num[:P_diag_shape])
+            P_posdef = cs.diag(theta_vector_num[:P_diag_shape])
             # Q_posdef = cs.diag(theta_vector_num[P_diag_shape:P_diag_shape+Q_diag_shape])
             # R_posdef = cs.diag(theta_vector_num[P_diag_shape+Q_diag_shape:P_diag_shape+Q_diag_shape+R_diag_shape])
 
-            # params["P"] = P_posdef
+            params["P"] = P_posdef
             # params["rnn_params"] = theta_vector_num[P_diag_shape+Q_diag_shape+R_diag_shape:]
             # params["Q"] = Q_posdef
             # params["R"] = R_posdef      
-            # params["rnn_params"] = theta_vector_num[P_diag_shape:]
-            params["rnn_params"] = theta_vector_num
+            params["rnn_params"] = theta_vector_num[P_diag_shape:]
+            # params["rnn_params"] = theta_vector_num
             
             params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])
             self.check_whh_spectral_radii(params_rnn)
@@ -3491,14 +3469,12 @@ class RLclass:
                 
                 # if i == 36*50*150:
                 #     self.alpha = self.alpha*0.01
-                if i == (2*50*150):
-                    self.alpha = self.alpha*0.1
-                # if i == 14*50*150:
-                #     self.alpha = self.alpha*0.01    
-                    
-                if i == 6*50*150+9*150:
-                    break  
-                 
+                # if i == (2*50*150-3*150):
+                #     self.alpha = self.alpha*0.01
+                if i == 8*50*150:
+                    self.alpha = self.alpha*0.01    
+                if i == 9*50*150:
+                    break
                 
                 noise = self.noise_scalingfactor*self.noise_scale_by_distance(x[0],x[1])
                 rand = noise * self.np_random.normal(loc=0, scale=self.noise_variance, size = (2,1))
@@ -3731,7 +3707,7 @@ class RLclass:
 
 
                         labels = [f"P[{i},{i}]" for i in range(4)]
-                        nn_grads = gradst
+                        nn_grads = gradst[:, 4:]
                         # take mean across rows (7,205) --> (7,)
                         mean_mag = np.mean(np.abs(nn_grads), axis=1)
 
@@ -3764,29 +3740,6 @@ class RLclass:
                             f"RNN_grad_plotat_{i}.svg")],
                             experiment_folder, "Learning")
                         # plt.show()
-                        
-                        NN_figgrad, ax = plt.subplots(figsize=(10, 10))
-                        k = np.arange(len(mean_mag))
-
-                        ax.plot(
-                            k, mean_mag,
-                            "o-", linewidth=2, markersize=4,
-                            label=r"RNN Gradient Mean"
-                        )
-
-                        ax.set_xlabel(r"Time Step $k$", fontsize=20)
-                        ax.set_ylabel(r"Mean Absolute Gradient", fontsize=20)
-
-                        ax.tick_params(labelsize=12)
-                        ax.grid(True, alpha=0.3)
-                        ax.legend(loc="upper right", fontsize=14, framealpha=0.9)
-
-                        NN_figgrad.tight_layout()
-
-                        self.save_figures(
-                            [(NN_figgrad, f"rnn_grad_mean_over_time_{i}.svg")],
-                            experiment_folder, "Learning"
-                        )
                         
                         
                         for i in range(hx_list.shape[1]):

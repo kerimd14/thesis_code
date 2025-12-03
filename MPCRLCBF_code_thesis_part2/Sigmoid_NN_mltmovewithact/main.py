@@ -63,7 +63,7 @@ def main():
     replay_buffer_size = episode_duration * episode_update_freq  # buffer holding number of episodes (e.g. hold 10 episodes)
     
     #name of folder where the experiment is saved
-    experiment_folder = "NNSigmoid_52_noP_diag"
+    experiment_folder = "SNNCBF2"
     
     #check if file exists already, if yes raise an exception
     # if os.path.exists(experiment_folder):
@@ -118,8 +118,8 @@ def main():
     
     # ─── Build & initialize NN CBF ───────────────────────────────────────────
 
-    input_dim = NUM_STATES + len(positions) + 2*len(positions) #x+h(x)+ (obs_positions_x + obs_positions_y)
-    hidden_dims = [16, 16, 16]
+    input_dim = NUM_STATES + len(positions) + 2*len(positions) + NUM_INPUTS #x+h(x)+ (obs_positions_x + obs_positions_y) + input_dim
+    hidden_dims = [32, 32, 16]
     output_dim = len(positions)
     layers_list = [input_dim] + hidden_dims + [output_dim]
     print("NN layers:", layers_list)

@@ -227,7 +227,7 @@ def make_system_obstacle_montage_v1(
     camera: str = "static", follow_width: float = 4.0, follow_height: float = 4.0,
 
     # ---- styling ----
-    system_color: str = "grey", pred_color: str = "#000000FF",
+    system_color: str = "C0", pred_color: str = "orange",
     tick_fontsize: int = 16, axis_labelsize: int = 22,
     axis_labelpad_xy: tuple[int, int] = (24, 24),
     spine_width: float = 1.25, tick_width: float = 1.25,
@@ -326,9 +326,9 @@ def make_system_obstacle_montage_v1(
     cmap = plt.get_cmap("tab10"); obst_cols = [cmap.colors[i % len(cmap.colors)] for i in range(m)]
 
     handles = [
-        mlines.Line2D([], [], marker="o", color=sys_rgb, lw=2, label=f"Last Steps (N={trail_N})"),
+        mlines.Line2D([], [], color=sys_rgb, lw=2, label=f"Last Steps (N={trail_N})"),
         mlines.Line2D([], [], marker="o", linestyle="None", color="red", markersize=7, label="System"),
-        mlines.Line2D([], [], marker="o", color=pred_rgb, lw=2, label=f"Predicted Horizon (N={N})"),
+        mlines.Line2D([], [], color=pred_rgb, lw=2, label=f"Predicted Horizon (N={N})"),
         *[mlines.Line2D([], [], color=obst_cols[i], lw=2, label=f"Obstacle {i+1}") for i in range(m)],
         mlines.Line2D([], [], color=obst_cols[0], lw=1.2, ls="--", alpha=0.3,
                       label=f"Obstacle (Predicted, {int(obs_lookahead)})"),
@@ -970,21 +970,22 @@ def run_simulation(params, env, experiment_folder, episode_duration, layers_list
         plt.tight_layout()
         hx_col_figs.append((fig_hi_col, f"hx_colored_obstacle_{i+1}_{'after' if after_updates else 'before'}.png"))
 
-    # fig8 = plt.figure()
-    # plt.plot(states[:,0], states[:,1], color='gray', alpha=0.5)
-    # sc1 = plt.scatter(states[:,0], states[:,1], c=iters, cmap=cmap, norm=norm, s=40)
-    # cb1 = plt.colorbar(sc1, label='Iteration $k$')   # grab the Colorbar
-    # cb1.set_label('Iteration $k$', fontsize=16)       # label font size
-    # cb1.ax.tick_params(labelsize=12)    
-    # circle = plt.Circle((-2, -2.25), 1.5, color='k', fill=False, linewidth=2)
-    # plt.gca().add_patch(circle)
-    # plt.xlim([-5,0]); plt.ylim([-5,0])
-    # plt.xlabel('$X$',fontsize=20); plt.ylabel('$Y$', fontsize=20)
-    # # plt.title('Trajectory Colored by Iteration')
-    # plt.axis('equal'); plt.grid(); plt.tight_layout()
-    # plt.xticks(fontsize=12)
-    # plt.yticks(fontsize=12)
-    # # Save Figures
+    fig8 = plt.figure()
+    plt.plot(states[:,0], states[:,1], color='gray', alpha=0.5)
+    sc1 = plt.scatter(states[:,0], states[:,1], c=iters, cmap=cmap, norm=norm, s=40)
+    cb1 = plt.colorbar(sc1, label='Time Step $k$')   # grab the Colorbar
+    cb1.set_label('Time Step $k$', fontsize=16)       # label font size
+    cb1.ax.tick_params(labelsize=12)    
+    circle = plt.Circle((-2, -2.25), 1.5, color='k', fill=False, linewidth=2)
+    plt.gca().add_patch(circle)
+    plt.xlim([-5,0]); plt.ylim([-5,0])
+    plt.xlabel('$X$',fontsize=20); plt.ylabel('$Y$', fontsize=20)
+    # plt.title('Trajectory Colored by Iteration')
+    plt.axis('equal'); plt.grid(); plt.tight_layout()
+    plt.xticks(fontsize=12)
+    plt.yticks(fontsize=12)
+    plt.show()
+    # Save Figures
     
     fig_dyn = plot_traj_colored_only_in_region(
     states=states,
@@ -1010,7 +1011,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, layers_list
         (fig_stagecost, f"stagecost_{'after' if after_updates else 'before'}.png"),
         (fig_alpha,     f"alpha_{'after' if after_updates else 'before'}.png"),
         (fig_velocity,  f"velocity_{'after' if after_updates else 'before'}.png"),
-        # (fig8, f"states_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg")
+        (fig8, f"states_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg")
         (fig_dyn,       f"traj_dynamic_{'afterupdates' if after_updates else 'beforeupdates'}.svg")
     ]
     # add each h_i plot:

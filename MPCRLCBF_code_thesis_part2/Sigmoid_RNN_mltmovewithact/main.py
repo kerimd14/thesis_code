@@ -1,12 +1,9 @@
-
 import multiprocessing
 import os
 import copy
 import optuna
 import numpy as np
 import casadi as cs
-
-
 
 from config import (
     SAMPLING_TIME,
@@ -16,7 +13,7 @@ from config import (
     CONSTRAINTS_X,
     CONSTRAINTS_U,
 )
-from Classes import env, RLclass, NN
+from Classes import env, RLclass, RNN
 from Functions import (
     run_simulation,
     run_simulation_randomMPC,
@@ -26,10 +23,9 @@ from Functions import (
 )
 
 
-
 def main():
     """
-    Main for raining a CBF NN with MPC in a moving-obstacle environment.
+    Main for raining a CBF RNN with MPC in a moving-obstacle environment.
     """
     
     # ─── Experiment variables ────────────────────────────────────────────
@@ -47,11 +43,13 @@ def main():
     print(f"Computed noise decay_rate: {decay_rate:.4f}")
 
     # RL hyper-parameters
-    alpha = 7e-3       # initial learning rate
-    gamma = 0.95        # discount factor
-    slack_penalty_MPC = 2e7  # penalty on slack variables in CBF constraints for the MPC stage cost
-    slack_penalty_RL = 3e4 # penalty on slack variables in CBF constraints for RL stage cost
-    
+    alpha = 7e-5      # initial learning rate
+    gamma = 0.99       # discount factor
+    slack_penalty_MPC_L1 = 2e7  # penalty on slack variables in CBF constraints for the MPC stage cost
+    slack_penalty_MPC_L2 = 0#1e3
+    slack_penalty_RL_L1 = 2e7 # penalty on slack variables in CBF constraints for RL stage cost
+    slack_penalty_RL_L2 = 0#1e3 # penalty on slack variables in CBF constraints for RL stage cost
+    violation_penalty = 0#4e5  # penalty on constraint violation (used in stage cost function)
     # Learning rate scheduler
     # patience = number of epochs with no improvement after which learning rate will be reduced
     patience = 5
@@ -62,8 +60,9 @@ def main():
     mpc_horizon = 6
     replay_buffer_size = episode_duration * episode_update_freq  # buffer holding number of episodes (e.g. hold 10 episodes)
     
+    
     #name of folder where the experiment is saved
-    experiment_folder = "NNSigmoid_52_noP_diag"
+    experiment_folder = "SRNNCBF_3"
     
     #check if file exists already, if yes raise an exception
     # if os.path.exists(experiment_folder):
@@ -96,37 +95,29 @@ def main():
     # radii     = [0.75, 0.75]
     # modes     = ["step_bounce", "step_bounce"]
     # mode_params = [
-    #     {"bounds": (-4.0,  0.0), "speed": 4.3, "dir":  1},
-    #     {"bounds": (-4.0,  1.0), "speed": 4.0, "dir": -1},
+    #     {"bounds": (-4.0,  0.0), "speed": 2.3, "dir":  1},
+    #     {"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
     # ]
     positions = [(-2.0, -1.5), (-3.0, -3.3), (-2.0, 0.0)]
     radii     = [0.7, 0.7, 1]
     modes     = ["step_bounce", "step_bounce", "static"]
     mode_params = [
-    {"bounds": (-4.0,  0.0), "speed": 2.3, "dir":  1},
+    {"bounds": (-4.0,  0), "speed": 2.3, "dir":  1},
     {"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
     {"bounds": (-2.0,  -2.0), "speed": 0.0},
-
 ]
-
-#     positions = [(-4.0, -4.25)]
-#     radii     = [1.5]
-#     modes     = ["static"]
-#     mode_params = [
-#     {"bounds": (-2.0,  -2.0), "speed": 0.0},
-# ]
     
-    # ─── Build & initialize NN CBF ───────────────────────────────────────────
+    # ─── Build & initialize RNN CBF ───────────────────────────────────────────
 
-    input_dim = NUM_STATES + len(positions) + 2*len(positions) #x+h(x)+ (obs_positions_x + obs_positions_y)
-    hidden_dims = [16, 16, 16]
+    input_dim = NUM_STATES + len(positions) + 2*len(positions)+NUM_INPUTS #x+h(x)+ (obs_positions_x + obs_positions_y) + u
+    hidden_dims = [32]
     output_dim = len(positions)
     layers_list = [input_dim] + hidden_dims + [output_dim]
-    print("NN layers:", layers_list)
+    print("RNN layers:", layers_list)
 
-    nn = NN(layers_list, positions, radii, copy.deepcopy(mode_params), modes)
-    flat_nn_params, _, _ = nn.initialize_parameters()
-    params_init["nn_params"] = flat_nn_params
+    rnn = RNN(layers_list, positions, radii, mpc_horizon, copy.deepcopy(mode_params), modes)
+    flat_rnn_params, _, _, _ = rnn.initialize_parameters()
+    params_init["rnn_params"] = flat_rnn_params
 
     # keep a copy of the original parameters for later logging
     params_before = params_init.copy()
@@ -149,7 +140,8 @@ def main():
     #     radii,
     #     modes,
     #     copy.deepcopy(mode_params),
-    #     slack_penalty_MPC,
+    #     slack_penalty_MPC_L1, 
+    #     slack_penalty_MPC_L2,
     # )
     
     # run simulation to get the initial policy before training
@@ -165,10 +157,11 @@ def main():
         radii=radii,
         modes=modes,
         mode_params=copy.deepcopy(mode_params),
-        slack_penalty_eval=slack_penalty_MPC,
+        slack_penalty_MPC_L1=slack_penalty_MPC_L1,
+        slack_penalty_MPC_L2=slack_penalty_MPC_L2,
     )
     
-    # use RL to train the NN CBF with MPC
+    # use RL to train the RNN CBF with MPC
     
     rl_agent = RLclass(
         params_init,
@@ -186,8 +179,11 @@ def main():
         radii,
         modes,
         copy.deepcopy(mode_params),
-        slack_penalty_MPC,
-        slack_penalty_RL,
+        slack_penalty_MPC_L1,
+        slack_penalty_MPC_L2,
+        slack_penalty_RL_L1,
+        slack_penalty_RL_L2,
+        violation_penalty
     )
     trained_params = rl_agent.rl_trainingloop(
         episode_duration=episode_duration,
@@ -211,7 +207,8 @@ def main():
         radii=radii,
         modes=modes,
         mode_params=copy.deepcopy(mode_params),
-        slack_penalty_eval=slack_penalty_MPC,
+        slack_penalty_MPC_L1=slack_penalty_MPC_L1,
+        slack_penalty_MPC_L2=slack_penalty_MPC_L2,
     )
     
     #save experiment configuration and results
@@ -241,8 +238,11 @@ def main():
         copy.deepcopy(mode_params),
         positions,
         radii,
-        slack_penalty_MPC,
-        slack_penalty_RL
+        slack_penalty_MPC_L1,
+        slack_penalty_MPC_L2,
+        slack_penalty_RL_L1,
+        slack_penalty_RL_L2,
+        violation_penalty
     )
 
     # append final stage-cost to folder name
@@ -252,8 +252,6 @@ def main():
     
 if __name__ == "__main__":
     main()
-    
-    
 # BASE_DIR = "optuna_runs_1"
 # if __name__ == "__main__":
     
@@ -262,10 +260,10 @@ if __name__ == "__main__":
 #     storage_path = os.path.join(BASE_DIR, "optuna.db")
 #     storage_uri  = f"sqlite:///{storage_path}"
     
-#     # optuna.delete_study(study_name="my_nn_mpc_study", storage="sqlite:///optuna_runs/optuna.db")
+#     # optuna.delete_study(study_name="my_rnn_mpc_study", storage="sqlite:///optuna_runs/optuna.db")
 #     study = optuna.create_study(
 #         storage=storage_uri,  
-#         study_name="nn_mpc_study",
+#         study_name="rnn_mpc_study",
 #         direction="minimize",
 #         sampler=optuna.samplers.TPESampler(),
 #         pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
@@ -282,12 +280,4 @@ if __name__ == "__main__":
 #     print("  Params:",    study.best_params)
     
 #     save_best_results(study)
-
-
-
-
-
-
-
-
 

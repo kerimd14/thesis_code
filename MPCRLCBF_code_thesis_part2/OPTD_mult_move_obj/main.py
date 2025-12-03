@@ -109,13 +109,6 @@ mode_params = [
 # inputs --> states and the different h(x)
 # last layer output --> number of obstacles aka for each h(x) have an alpha value
 
-layers_list = [NUM_STATES+len(positions), 14, 14, 14, len(positions)]
-print("layers_list: ", layers_list)
-#initializing the NN
-nn_model = NN(layers_list, positions, radii)
-
-list, _, _ = nn_model.initialize_parameters()
-
 params_innit["nn_params"] = list
 
 #seems params_innit gets overwritten
@@ -124,18 +117,18 @@ params_original = params_innit.copy()
 experiment_folder_name = "NNSigmoid_13"
 
 
-run_simulation_randomMPC(params_innit, env, experiment_folder_name, episode_duration, layers_list, noise_scalingfactor, noise_variance, 
+run_simulation_randomMPC(params_innit, env, experiment_folder_name, episode_duration, noise_scalingfactor, noise_variance, 
 horizon, positions, radii, modes, mode_params)
 
-stage_cost_sum_before = run_simulation(params_innit, env, experiment_folder_name, episode_duration, layers_list, False, horizon, positions, radii, modes, mode_params)
+stage_cost_sum_before = run_simulation(params_innit, env, experiment_folder_name, episode_duration, False, horizon, positions, radii, modes, mode_params)
 
-rl = RLclass(params_innit, seed, alpha, gamma, decay_rate, layers_list, noise_scalingfactor, 
+rl = RLclass(params_innit, seed, alpha, gamma, decay_rate, noise_scalingfactor, 
              noise_variance, patience_threshold, lr_decay_factor, horizon, positions, radii, modes, mode_params)
 
 params = rl.rl_trainingloop(episode_duration = episode_duration, num_episodes = num_episodes, replay_buffer=replay_buffer,
                             episode_updatefreq = episode_updatefreq, experiment_folder = experiment_folder_name)
 
-stage_cost_sum_after = run_simulation(params, env, experiment_folder_name, episode_duration, layers_list, True, horizon, positions, radii, modes, mode_params)
+stage_cost_sum_after = run_simulation(params, env, experiment_folder_name, episode_duration, True, horizon, positions, radii, modes, mode_params)
 
 
 generate_experiment_notes(experiment_folder_name, params, params_original, episode_duration, num_episodes, seed, alpha, dt, 

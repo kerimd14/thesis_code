@@ -436,6 +436,7 @@ class RNN:
         h_raw    = rnn_input[self.ns:self.ns+self.obst.obstacle_num]
         pos_x    = rnn_input[self.ns+self.obst.obstacle_num:self.ns+2*self.obst.obstacle_num]
         pos_y    = rnn_input[self.ns+2*self.obst.obstacle_num:self.ns+3*self.obst.obstacle_num]
+        u_raw  = rnn_input[-(NUM_INPUTS):]
         
         def scale_centered(z, zmin, zmax, eps=1e-12):
             return 2 * (z - zmin) / (zmax - zmin + eps) - 1
@@ -539,7 +540,7 @@ class RNN:
         pos_norm = cs.vertcat(*pos_x_norm, *pos_y_norm)
         
             
-        return cs.vertcat(x_norm, h_norm, pos_norm)
+        return cs.vertcat(x_norm, h_norm, pos_norm, u_raw)
     
     def _scale_to_spectral_radius(self, W: np.ndarray, target: float = 1.0, eps: float = 1e-12,
                               power_iters: int | None = None) -> np.ndarray:
@@ -1063,7 +1064,7 @@ class MPC:
 
         # build flat‐input function for RNN
         flat_input_fn =self.make_flat_input_fn()
-        flat_input = flat_input_fn(self.X_sym, self.xpred_hor, self.ypred_hor)
+        flat_input = flat_input_fn(self.X_sym, self.xpred_hor, self.ypred_hor, self.U_sym)
 
         # hidden‐state symbols and parameter symbols for the RNN
         self.hid_syms = self.rnn.hidden_sym_list            # [h0_layer0, h0_layer1, h0_layer2]
@@ -1109,10 +1110,12 @@ class MPC:
            i need to do this since i need to use RNN to calculate a number of these params 
         """
         X = cs.MX.sym("X", self.ns, self.horizon+1)
+        U = cs.MX.sym("U", self.na, self.horizon)
 
         inter = []
         for t in range(self.horizon):
             x_t    = X[:, t]
+            u_t = U[:, t]
             cbf_t  = [h_i(x_t, 
                           self.xpred_hor[t*self.m:(t+1)*self.m], 
                           self.ypred_hor[t*self.m:(t+1)*self.m]) 
@@ -1123,14 +1126,17 @@ class MPC:
             obs_x_list = cs.vertsplit(obs_x)  # [MX(1×1), ..., MX(1×1)]
             obs_y_list = cs.vertsplit(obs_y)
             
+            u_list = cs.vertsplit(u_t)  # [MX(1×1), MX(1×1)]
+            
             inter.append(x_t)                            # ns×1
             inter.extend(cbf_t)                          # m scalars
             inter.extend(obs_x_list)
             inter.extend(obs_y_list)
+            inter.extend(u_list)                            # na×1
 
         
         flat_in = cs.vertcat(*inter)  # ((ns+m)*horizon)×1
-        return cs.Function("flat_input", [X, self.xpred_hor, self.ypred_hor], [flat_in], ["X",  "xpred_list", "ypred_list"], ["flat_in"])
+        return cs.Function("flat_input", [X, self.xpred_hor, self.ypred_hor, U], [flat_in], ["X",  "xpred_list", "ypred_list", "U"], ["flat_in"])
     
     
     def cbf_const(self):
@@ -1305,7 +1311,7 @@ class MPC:
             "eval_errors_fatal": True,
             # Throw exceptions when function evaluation fails (default true).
             "error_on_fail": False,
-            "ipopt": {"max_iter": 500, "print_level": 0, "warm_start_init_point": "yes"},
+            "ipopt": {"max_iter": 2000, "print_level": 0, "warm_start_init_point": "yes"},
         }
 
         # Create the NLP solver instance
@@ -1357,7 +1363,7 @@ class MPC:
             "eval_errors_fatal": True,
             # Throw exceptions when function evaluation fails (default true).
             "error_on_fail": False,
-            "ipopt": {"max_iter": 500, "print_level": 0, "warm_start_init_point": "yes"},
+            "ipopt": {"max_iter": 2000, "print_level": 0, "warm_start_init_point": "yes"},
         }
 
         MPC_solver = cs.nlpsol("solver", "ipopt", nlp, opts)
@@ -1413,7 +1419,7 @@ class MPC:
             "eval_errors_fatal": True,
             # Throw exceptions when function evaluation fails (default true).
             "error_on_fail": False,
-            "ipopt": {"max_iter": 500, "print_level": 0, "warm_start_init_point": "yes"},
+            "ipopt": {"max_iter": 2000, "print_level": 0, "warm_start_init_point": "yes"},
         }
 
         MPC_solver = cs.nlpsol("solver", "ipopt", nlp, opts)
@@ -2746,7 +2752,8 @@ class RLclass:
             
             # calculate new hidden state of the RNN for V_MPC
             X = cs.reshape(solution["x"][:self.ns * (self.horizon+1)], self.ns, self.horizon + 1)
-            flat_input = self.flat_input_fn(X, xpred_list, ypred_list)
+            U = cs.reshape(solution["x"][self.ns * (self.horizon+1):self.ns * (self.horizon+1) + self.na * self.horizon], self.na, self.horizon)
+            flat_input = self.flat_input_fn(X, xpred_list, ypred_list, U)
             x_t0 = flat_input[:self.rnn_input_size]
             # print(f"VMPC raw:{x_t0}")
             x_t0 = self.mpc.rnn.normalization_z(x_t0)
@@ -2827,7 +2834,8 @@ class RLclass:
             
             # calculate new hidden state of the RNN for V_MPC_rand
             X = cs.reshape(solution["x"][:self.ns * (self.horizon+1)], self.ns, self.horizon + 1)
-            flat_input = self.flat_input_fn(X, xpred_list, ypred_list)
+            U = cs.reshape(solution["x"][self.ns * (self.horizon+1):self.ns * (self.horizon+1) + self.na * self.horizon], self.na, self.horizon)
+            flat_input = self.flat_input_fn(X, xpred_list, ypred_list, U)
             x_t0 = flat_input[:self.rnn_input_size]
             # print(f"VMPCrand raw:{x_t0}")
             x_t0=self.mpc.rnn.normalization_z(x_t0)
@@ -2925,7 +2933,8 @@ class RLclass:
             
             # calculate new hidden state of the RNN for Q_MPC
             X = cs.reshape(solution["x"][:self.ns * (self.horizon+1)], self.ns, self.horizon + 1)
-            flat_input = self.flat_input_fn(X, xpred_list, ypred_list)
+            U = cs.reshape(solution["x"][self.ns * (self.horizon+1):self.ns * (self.horizon+1) + self.na * self.horizon], self.na, self.horizon)
+            flat_input = self.flat_input_fn(X, xpred_list, ypred_list, U)
             x_t0 = flat_input[:self.rnn_input_size]
             x_t0 = self.mpc.rnn.normalization_z(x_t0)
             params_rnn = self.mpc.rnn.unpack_flat_parameters(params["rnn_params"])  
@@ -2968,32 +2977,6 @@ class RLclass:
                 + self.slack_penalty_RL_L1*(np.sum(S)/(self.horizon+self.mpc.rnn.obst.obstacle_num))
                 + 0.5 * self.slack_penalty_RL_L2* (np.sum(S**2) / (self.horizon+self.mpc.rnn.obst.obstacle_num)) 
                 + np.sum(self.violation_penalty*violations)
-            )
-            
-        def stage_cost_alt(self, action, state):
-            """
-            Computes the stage cost : L(s,a).
-            
-            Args:
-                action: (na,):
-                    Control action vector.
-                state: (ns,):
-                    Current state vector of the system
-                S: (m*(horizon+1),):
-                    Slack variables for the MPC problem, used in the stage cost.
-                    Slacks that were used for relaxing CBF constraints in the MPC problem.
-            
-            Returns:
-                float:
-                    The computed stage cost value.
-            """
-            # same as the MPC ones
-            Qstage = np.diag([10, 10, 10, 10])
-            Rstage = np.diag([1, 1])
-                  
-            return (
-                state.T @ Qstage @ state
-                + action.T @ Rstage @ action 
             )
         
         def evaluation_step(self, params, experiment_folder, episode_duration):
@@ -3074,7 +3057,6 @@ class RLclass:
             # self.x_prev_VMPC        = cs.DM()  
             # self.lam_x_prev_VMPC    = cs.DM()  
             # self.lam_g_prev_VMPC    = cs.DM()  
-            stage_cost_eval_alt = []
 
             for i in range(episode_duration):
                 action, _, hidden_in, alpha, plan_xy, _ = self.V_MPC(params=params, x=state, 
@@ -3094,7 +3076,7 @@ class RLclass:
                 
                 action = cs.fmin(cs.fmax(cs.DM(action), -CONSTRAINTS_U), CONSTRAINTS_U)
                 stage_cost_eval.append(self.stage_cost(action, state, self.S_VMPC, hx))
-                stage_cost_eval_alt.append(self.stage_cost_alt(action, state))
+                
                 # print(f"evaluation step {i}, action: {action}, slack: {np.sum(5e4*self.S_VMPC)}")
                 state, _, done, _, _ = self.env.step(action)
                 states_eval.append(state)
@@ -3120,8 +3102,7 @@ class RLclass:
             slacks_eval = np.stack(slacks_eval, axis=0)
             plans_eval = np.array(plans_eval) 
             
-            sum_stage_cost = np.sum(stage_cost_eval) 
-            sum_stage_cost_alt = np.sum(stage_cost_eval_alt)
+            sum_stage_cost = np.sum(stage_cost_eval)
             print(f"Stage Cost: {sum_stage_cost}")
 
             figstates=plt.figure()
@@ -3256,7 +3237,7 @@ class RLclass:
             #     trail_len=self.horizon      # fade the tail to last H
             # )
             
-            out_gif = os.path.join(target_folder, f"system_and_obstaclewithobstpred_{self.eval_count}_SC_{sum_stage_cost_alt}.gif")
+            out_gif = os.path.join(target_folder, f"system_and_obstaclewithobstpred_{self.eval_count}_SC_{sum_stage_cost}.gif")
             
             self.make_system_obstacle_animation_v3(
                 states_eval[:T_pred],
@@ -3491,13 +3472,10 @@ class RLclass:
                 
                 # if i == 36*50*150:
                 #     self.alpha = self.alpha*0.01
-                if i == (2*50*150):
-                    self.alpha = self.alpha*0.1
-                # if i == 14*50*150:
-                #     self.alpha = self.alpha*0.01    
-                    
-                if i == 6*50*150+9*150:
-                    break  
+                # if i == (2*50*150-3*150):
+                #     self.alpha = self.alpha*0.01
+                if i == 11*50*150:
+                    self.alpha = self.alpha*0.01    
                  
                 
                 noise = self.noise_scalingfactor*self.noise_scale_by_distance(x[0],x[1])
@@ -3731,7 +3709,7 @@ class RLclass:
 
 
                         labels = [f"P[{i},{i}]" for i in range(4)]
-                        nn_grads = gradst
+                        nn_grads = gradst[:, 4:]
                         # take mean across rows (7,205) --> (7,)
                         mean_mag = np.mean(np.abs(nn_grads), axis=1)
 
@@ -3764,29 +3742,6 @@ class RLclass:
                             f"RNN_grad_plotat_{i}.svg")],
                             experiment_folder, "Learning")
                         # plt.show()
-                        
-                        NN_figgrad, ax = plt.subplots(figsize=(10, 10))
-                        k = np.arange(len(mean_mag))
-
-                        ax.plot(
-                            k, mean_mag,
-                            "o-", linewidth=2, markersize=4,
-                            label=r"RNN Gradient Mean"
-                        )
-
-                        ax.set_xlabel(r"Time Step $k$", fontsize=20)
-                        ax.set_ylabel(r"Mean Absolute Gradient", fontsize=20)
-
-                        ax.tick_params(labelsize=12)
-                        ax.grid(True, alpha=0.3)
-                        ax.legend(loc="upper right", fontsize=14, framealpha=0.9)
-
-                        NN_figgrad.tight_layout()
-
-                        self.save_figures(
-                            [(NN_figgrad, f"rnn_grad_mean_over_time_{i}.svg")],
-                            experiment_folder, "Learning"
-                        )
                         
                         
                         for i in range(hx_list.shape[1]):

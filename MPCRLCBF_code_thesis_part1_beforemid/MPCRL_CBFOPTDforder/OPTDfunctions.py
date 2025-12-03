@@ -7,6 +7,7 @@ from control import dlqr
 from OPTDclasses import  MPC
 from matplotlib.colors import Normalize
 import matplotlib.cm as cm
+from npz_builder import NPZBuilder
 
 # global u constraint, used to play with the u constraint
 u_global = 1
@@ -203,7 +204,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     figactions=plt.figure()
     plt.plot(actions[:, 0], "o-", label="Action 1")
     plt.plot(actions[:, 1], "o-", label="Action 2")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Action")
     plt.title("Actions")
     plt.legend()
@@ -213,7 +214,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
 
     figstagecost=plt.figure()
     plt.plot(stage_cost, "o-")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Cost")
     plt.title("Stage Cost")
     plt.legend()
@@ -223,7 +224,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
 
     figsomega=plt.figure()
     plt.plot(omegas, "o-")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("$omega$ Value")
     plt.title("$omega$")
     plt.legend()
@@ -235,7 +236,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     figsvelocity=plt.figure()
     plt.plot(states[:, 2], "o-", label="Velocity x")
     plt.plot(states[:, 3], "o-", label="Velocity y")    
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Velocity Value")
     plt.title("Velocity Plot")
     plt.legend()
@@ -245,7 +246,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
 
     figshx =plt.figure()
     plt.plot(hx, "o-", label="$h(x_k)$")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("$h(x_k)$ Value")
     plt.title("$h(x_k)$ Plot")
     plt.legend()
@@ -256,7 +257,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     margin = hx[1:] - (np.ones(omegas.shape[0])- omegas) * hx[:-1]
     plt.plot(margin, marker='o', linestyle='-')
     plt.axhline(0, color='r', linestyle='--', label='safety threshold')
-    plt.xlabel(r'Iteration $k$')
+    plt.xlabel(r'Time Step $k$')
     plt.ylabel(r'$h(x_{k+1}) - (1-\alpha) \cdot h(x_k)$')
     plt.title('CBF Safety Margin over Time')
     plt.legend()
@@ -267,7 +268,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     plt.plot(g_resid, marker='o', linestyle='-', label = "$g(x_k)$")
     plt.plot(margin, marker='o', linestyle='-', label = "$margin$")
     plt.axhline(0, color='r', linestyle='--', label='safety threshold')
-    plt.xlabel(r'Iteration $k$')
+    plt.xlabel(r'Time Step $k$')
     plt.ylabel(r'$h(x_{k+1}) - (1-\alpha) \cdot h(x_k)$')
     plt.title('CBF Safety Margin over Time')
     plt.legend()
@@ -285,14 +286,14 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     fig8 = plt.figure()
     plt.plot(states[:,0], states[:,1], color='gray', alpha=0.5)
     sc1 = plt.scatter(states[:,0], states[:,1], c=iters, cmap=cmap, norm=norm, s=40)
-    cb1 = plt.colorbar(sc1, label='Iteration $k$')   # grab the Colorbar
-    cb1.set_label('Iteration $k$', fontsize=16)       # label font size
+    cb1 = plt.colorbar(sc1, label='Time Step $k$')   # grab the Colorbar
+    cb1.set_label('Time Step $k$', fontsize=16)       # label font size
     cb1.ax.tick_params(labelsize=12)  
     circle = plt.Circle((-2, -2.25), 1.5, color='k', fill=False, linewidth=2)
     plt.gca().add_patch(circle)
     plt.xlim([-5,0]); plt.ylim([-5,0])
     plt.xlabel('$X$', fontsize=20); plt.ylabel('$Y$', fontsize=20)
-    # plt.title('Trajectory Colored by Iteration')
+    # plt.title('Trajectory Colored by Time Step')
     plt.axis('equal'); plt.grid(); plt.tight_layout()
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
@@ -302,11 +303,11 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     fig9 = plt.figure()
     plt.plot(omegas, color='gray', alpha=0.5)
     sc2 = plt.scatter(iters[:-1], omegas, c=iters[:-1], cmap=cmap, norm=norm, s=40)
-    cb2 = plt.colorbar(sc2, label='Iteration $k$')
-    cb2.set_label('Iteration $k$', fontsize=16)
+    cb2 = plt.colorbar(sc2, label='Time Step $k$')
+    cb2.set_label('Time Step $k$', fontsize=16)
     cb2.ax.tick_params(labelsize=12)
-    plt.xlabel('Iteration $k$', fontsize=20); plt.ylabel('$\omega$ Value', fontsize=20)
-    # plt.title('Omega Colored by Iteration'); 
+    plt.xlabel('Time Step $k$', fontsize=20); plt.ylabel('$\omega$ Value', fontsize=20)
+    # plt.title('Omega Colored by Time Step'); 
     plt.grid(); plt.tight_layout()
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
@@ -316,11 +317,11 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     fig10 = plt.figure()
     plt.plot(hx, color='gray', alpha=0.5)
     sc3 = plt.scatter(iters, hx, c=iters, cmap=cmap, norm=norm, s=40)
-    cb3 = plt.colorbar(sc3, label='Iteration $k$')
-    cb3.set_label('Iteration $k$', fontsize=16)
+    cb3 = plt.colorbar(sc3, label='Time Step $k$')
+    cb3.set_label('Time Step $k$', fontsize=16)
     cb3.ax.tick_params(labelsize=12)
-    plt.xlabel('Iteration $k$', fontsize=20); plt.ylabel('$h(x_k)$', fontsize=20)
-    # plt.title('h(x_k) Colored by Iteration');
+    plt.xlabel('Time Step $k$', fontsize=20); plt.ylabel('$h(x_k)$', fontsize=20)
+    # plt.title('h(x_k) Colored by Time Step');
     plt.grid(); plt.tight_layout()
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
@@ -329,10 +330,10 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     fig11 = plt.figure()
     plt.plot(margin, color='gray', alpha=0.5)
     sc4 = plt.scatter(iters[:-1], margin, c=iters[:-1], cmap=cmap, norm=norm, s=40)
-    plt.colorbar(sc4, label='Iteration $k$')
+    plt.colorbar(sc4, label='Time Step $k$')
     plt.axhline(0, color='r', linestyle='--')
-    plt.xlabel('Iteration $k$'); plt.ylabel(r'$h(x_{k+1}) - (1-\alpha)\,h(x_k)$')
-    plt.title('Margin Colored by Iteration'); 
+    plt.xlabel('Time Step $k$'); plt.ylabel(r'$h(x_{k+1}) - (1-\alpha)\,h(x_k)$')
+    plt.title('Margin Colored by Time Step'); 
     plt.grid(); plt.tight_layout()
 
     plt.show()
@@ -369,6 +370,61 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     trajectory_length = calculate_trajectory_length(states)
     print(f"Total trajectory length: {trajectory_length:.3f} units")
     print(f"Stage Cost: {sum(stage_cost)}")
+
+    suffix   = "after" if after_updates else "before"
+    data_dir = os.path.join(experiment_folder, "thesis_data_mpcregular")
+
+    # Ensure dtypes/shapes
+    states   = np.asarray(states,   dtype=np.float64)
+    actions  = np.asarray(actions,  dtype=np.float64)
+    stage_cost = np.asarray(stage_cost, dtype=np.float64).reshape(-1)
+    omegas   = np.asarray(omegas,   dtype=np.float64).reshape(-1)
+    hx       = np.asarray(hx,       dtype=np.float64).reshape(-1)
+    g_resid  = np.asarray(g_resid_lst, dtype=np.float64).reshape(-1)
+
+    # Iter index for colored plots
+    iters = np.arange(len(hx), dtype=np.int64)
+
+    # Safety margin exactly as used in plots, but made robust to length mismatch
+    # (omegas may be N-1). We align to hx[:-1].
+    omegas_for_margin = omegas[: max(0, len(hx)-1)]
+    margin = hx[1:1+len(omegas_for_margin)] - (1.0 - omegas_for_margin) * hx[:len(omegas_for_margin)]
+
+    # Obstacle and axes used in plots (meta)
+    obs_center = np.array([-2.0, -2.25], dtype=np.float64)
+    obs_radius = float(1.5)
+    xlim = np.array([-5.0, 0.0], dtype=np.float64)
+    ylim = np.array([-5.0, 0.0], dtype=np.float64)
+
+    mpc_npz = NPZBuilder(data_dir, "mpc_regular", float_dtype="float32")
+    mpc_npz.add(
+        # Series used directly by figures
+        states=states,                 # positions & velocities
+        actions=actions,
+        stage_cost=stage_cost,
+        omegas=omegas,
+        hx=hx,
+        g_resid=g_resid,
+        margin=margin,
+        iters=iters
+    )
+
+    # Optional but handy meta so plotting is standalone and reproducible
+    mpc_npz.meta(
+        Pw=float(params.get("Pw", np.nan)),
+        omega0=float(params.get("omega0", np.nan)),
+        obs_center=obs_center,
+        obs_radius=obs_radius,
+        xlim=xlim,
+        ylim=ylim,
+        run_tag=suffix,
+        trajectory_length=float(trajectory_length),
+        stage_cost_sum=float(stage_cost.sum())
+    )
+
+    npz_path = mpc_npz.finalize(suffix=suffix)
+    print(f"[saved] {npz_path}")
+
 
     return sum(stage_cost)
 
@@ -508,7 +564,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     figactions=plt.figure()
     plt.plot(actions[:, 0], "o-", label="Action 1")
     plt.plot(actions[:, 1], "o-", label="Action 2")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Action")
     plt.title("Actions")
     plt.legend()
@@ -518,7 +574,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
 
     figstagecost=plt.figure()
     plt.plot(stage_cost, "o-")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Cost")
     plt.title("Stage Cost")
     plt.legend()
@@ -529,7 +585,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     figsvelocity=plt.figure()
     plt.plot(states[:, 2], "o-", label="Velocity x")
     plt.plot(states[:, 3], "o-", label="Velocity y")    
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Velocity Value")
     plt.title("Velocity Plot")
     plt.legend()

@@ -43,11 +43,11 @@ def main():
     print(f"Computed noise decay_rate: {decay_rate:.4f}")
 
     # RL hyper-parameters
-    alpha = 7e-3      # initial learning rate
+    alpha = 7e-5      # initial learning rate
     gamma = 0.95       # discount factor
     slack_penalty_MPC_L1 = 2e7  # penalty on slack variables in CBF constraints for the MPC stage cost
     slack_penalty_MPC_L2 = 0#1e3
-    slack_penalty_RL_L1 = 3e4 # penalty on slack variables in CBF constraints for RL stage cost
+    slack_penalty_RL_L1 = 5e3 # penalty on slack variables in CBF constraints for RL stage cost
     slack_penalty_RL_L2 = 0#1e3 # penalty on slack variables in CBF constraints for RL stage cost
     violation_penalty = 0#4e5  # penalty on constraint violation (used in stage cost function)
     # Learning rate scheduler
@@ -62,7 +62,7 @@ def main():
     
     
     #name of folder where the experiment is saved
-    experiment_folder = "RNN_mult_move_obj_experiment_318"
+    experiment_folder = "RNN_mult_move_obj_experiment_351"
     
     #check if file exists already, if yes raise an exception
     # if os.path.exists(experiment_folder):
@@ -110,7 +110,7 @@ def main():
     # ─── Build & initialize RNN CBF ───────────────────────────────────────────
 
     input_dim = NUM_STATES + len(positions) + 2*len(positions) #x+h(x)+ (obs_positions_x + obs_positions_y)
-    hidden_dims = [16, 16, 16]
+    hidden_dims = [16, 16, 16]#[16, 16, 16]
     output_dim = len(positions)
     layers_list = [input_dim] + hidden_dims + [output_dim]
     print("RNN layers:", layers_list)

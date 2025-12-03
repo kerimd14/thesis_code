@@ -34,7 +34,7 @@ def stage_cost_func(action, x, S, slack_penalty):
             state = x
             return (
                 state.T @ Qstage @ state
-                + action.T @ Rstage @ action + np.sum(slack_penalty * S)  # slack penalty
+                + action.T @ Rstage @ action + slack_penalty*np.sum(S)  # slack penalty
             )
                 
 
@@ -435,36 +435,63 @@ def make_system_obstacle_animation_v3(
         # display controls
         figsize=(6.5, 6),
         dpi=140,
-        legend_outside=True,
-        legend_loc="upper left",
+
+        # ---------- styling to match montage ----------
+        system_color: str = "grey",
+        pred_color: str = "#000000FF",
+        tick_fontsize: int = 18,
+        axis_labelsize: int = 26,
+        axis_labelpad_xy: tuple[int, int] = (10, 10),   # closer to axes
+        spine_width: float = 1.25,
+        tick_width: float = 1.25,
+        tick_pad: int = 2,                               # tick labels closer
+        legend_fontsize: int = 16,
+        legend_borderaxespad: float = 0.6,
+        legend_borderpad: float = 0.6,
+        legend_scale_factor: float = 0.92,
+        legend_outside: bool = True,      # outside but tight bbox when saving
+        legend_loc: str = "center left",
+
+        # figure margins (tight layout without white edges)
+        left_pad: float = 0.03,
+        right_pad: float = 0.01,
+        bottom_pad: float = 0.06,
+        top_pad: float = 0.02,
 
         # zoom / camera
         camera="static",              # "static" or "follow"
-        follow_width=4.0,             # view width around agent when following
+        follow_width=4.0,
         follow_height=4.0,
 
-        # timing & colors
-        trail_len: int | None = None, # if None → horizon length
-        fps: int = 12,                # save speed (lower = slower)
-        interval_ms: int = 300,       # live/preview speed (higher = slower)
-        system_color: str = "C0",     # trail color
-        pred_color: str = "orange",   # prediction color (line + markers)
+        # --------- global & segment speeds ----------
+        base_fps: int = 12,                 # global playback rate
+        segment_range: tuple[int, int] | None = (9, 20),  # inclusive indices
+        segment_fps: float | None = 6,   # desired fps INSIDE segment
 
-        # output/interaction
-        show: bool = False,           # open interactive window (zoom/pan)
+        # live preview only (does not affect saved timing)
+        interval_ms: int = 300,
+
+        # trail and output
+        trail_len: int | None = None,       # if None → horizon length
+        show: bool = False,
         save_gif: bool = True,
         save_mp4: bool = False,
         mp4_path: str | None = None,
     ):
-    """Animated plot of system, moving obstacles, trailing path, and predicted horizon.
-       Now also draws faded, dashed obstacle outlines at the next N predicted steps.
+    """Animated plot of system, obstacles, and predicted horizon.
+
+    Saved timing is controlled by:
+      - base_fps: the global frames-per-second of the saved file
+      - segment_range + segment_fps: speed only within [k0, k1]
+        * segment_fps < base_fps => slow down via frame repetition
+        * segment_fps > base_fps => speed up via frame skipping
     """
 
-    # ---- harmonize lengths (avoid off-by-one) ----
+    # ---- harmonize lengths ----
     T_state = states_eval.shape[0]
     T_pred  = pred_paths.shape[0]
     T_obs   = obs_positions.shape[0]
-    T = min(T_state, T_pred, T_obs)  # clamp to shortest
+    T = min(T_state, T_pred, T_obs)
     system_xy     = states_eval[:T, :2]
     obs_positions = obs_positions[:T]
     pred_paths    = pred_paths[:T]
@@ -482,71 +509,72 @@ def make_system_obstacle_animation_v3(
 
     # ---- figure/axes ----
     fig, ax = plt.subplots(figsize=figsize)
+    fig.subplots_adjust(left=left_pad, right=1 - right_pad,
+                        bottom=bottom_pad, top=1 - top_pad)
+
     ax.set_aspect("equal", "box")
     ax.grid(True, alpha=0.35)
-    ax.set_xlabel(r"$x$")
-    ax.set_ylabel(r"$y$")
-    ax.set_title(r"System + Moving Obstacles + Horizon")
+    ax.set_xlabel("X", fontsize=axis_labelsize, labelpad=axis_labelpad_xy[0])
+    ax.set_ylabel("Y", fontsize=axis_labelsize, labelpad=axis_labelpad_xy[1])
+    ax.tick_params(labelsize=tick_fontsize, width=tick_width, pad=tick_pad)
+    for s in ax.spines.values():
+        s.set_linewidth(spine_width)
 
     # initial static window (camera="follow" will override per-frame)
     span = constraints_x
-    ax.set_xlim(-1.1*span, +0.2*span)   # widened so circles aren’t clipped
+    ax.set_xlim(-1.1*span, +0.2*span)
     ax.set_ylim(-1.1*span, +0.2*span)
 
     # ---- artists ----
-    # trail: solid line + fading dots (dots exclude current)
-    trail_ln, = ax.plot([], [], "-", lw=2, color=sys_rgb, zorder=2.0, label=fr"last {trail_len} steps")
+    trail_ln, = ax.plot([], [], "-", lw=2, color=sys_rgb, zorder=2.0)
     trail_pts  = ax.scatter([], [], s=26, zorder=2.1)
+    agent_pt,  = ax.plot([], [], "o", ms=7, color="red", zorder=5.0)
 
-    # system dot (topmost)
-    agent_pt,  = ax.plot([], [], "o", ms=7, color="red", zorder=5.0, label="system")
-
-    # prediction: fading line (LineCollection) + markers (all orange)
     pred_lc = LineCollection([], linewidths=2, zorder=2.2)
     ax.add_collection(pred_lc)
     horizon_markers = [ax.plot([], [], "o", ms=5, color=pred_rgb, zorder=2.3)[0] for _ in range(N)]
-    # proxy line so it appears in legend
-    ax.plot([], [], "-", lw=2, color=pred_rgb, label="predicted horizon", zorder=2.2)
 
-    # obstacles (current time k)
     cmap   = plt.get_cmap("tab10")
-    colors = cmap.colors
+    obst_cols = [cmap.colors[i % len(cmap.colors)] for i in range(m)]
     circles = []
     for i, r in enumerate(radii):
-        c = plt.Circle((0, 0), r, fill=False, color=colors[i % len(colors)],
-                       lw=2, label=f"obstacle {i+1}", zorder=1.0)
-        ax.add_patch(c)
-        circles.append(c)
+        c = plt.Circle((0, 0), r, fill=False, color=obst_cols[i], lw=2, zorder=1.0)
+        ax.add_patch(c); circles.append(c)
 
-    # --- NEW: predicted obstacle outlines for the next N steps (ghosted) ---
-    # one dashed circle per (future step h=1..N, obstacle i=1..m)
-    pred_alpha_seq = np.linspace(0.35, 0.3, max(N, 1))  # nearer -> darker, farther -> lighter
-    pred_circles_layers = []  # list of lists: [layer_h][i] -> patch
+    # ghosted predicted obstacles
+    pred_alpha_seq = np.linspace(0.35, 0.30, max(N, 1))
+    pred_circles_layers = []
     for h in range(1, N+1):
         layer = []
         a = float(pred_alpha_seq[h-1])
         for i, r in enumerate(radii):
-            pc = plt.Circle((0, 0), r, fill=False,
-                            color=colors[i % len(colors)],
-                            lw=1.2, linestyle="--", alpha=a,
-                            zorder=0.8)  # behind current circles
-            ax.add_patch(pc)
-            layer.append(pc)
+            pc = plt.Circle((0, 0), r, fill=False, color=obst_cols[i],
+                            lw=1.2, linestyle="--", alpha=a, zorder=0.8)
+            ax.add_patch(pc); layer.append(pc)
         pred_circles_layers.append(layer)
-    if N > 0:
-        # legend proxy for predicted obstacle outlines
-        ax.plot([], [], linestyle="--", lw=1.2, color=colors[0],
-                alpha=0.3, label="obstacle (predicted)")
 
-    # legend placement
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    # ---- legend proxies ----
+    trail_N = trail_len
+    handles = [
+        mlines.Line2D([], [], marker="o", color=sys_rgb, lw=2, label=f"Last Steps (N={trail_N})"),
+        mlines.Line2D([], [], marker="o", linestyle="None", color="red", markersize=7, label="System"),
+        mlines.Line2D([], [], marker="o", color=pred_rgb, lw=2, label=f"Predicted Horizon (N={N})"),
+        *[mlines.Line2D([], [], color=obst_cols[i], lw=2, label=f"Obstacle {i+1}") for i in range(m)]
+    ]
+    if N > 0 and m > 0:
+        handles.append(mlines.Line2D([], [], color=obst_cols[0], lw=1.2, ls="--", alpha=0.3,
+                                     label=f"Obstacle (Predicted, N={N} Ahead)"))
+    legend_fs_eff = int(round(legend_fontsize * legend_scale_factor))
     if legend_outside:
-        fig.subplots_adjust(right=0.68)
-        ax.legend(loc=legend_loc, bbox_to_anchor=(1.02, 1.0),
-                  borderaxespad=0.0, framealpha=0.9)
+        fig.legend(handles=handles, loc=legend_loc, bbox_to_anchor=(1.01, 0.5),
+                   framealpha=0.95, fontsize=legend_fs_eff,
+                   borderaxespad=legend_borderaxespad, borderpad=legend_borderpad)
     else:
-        ax.legend(loc="upper right", framealpha=0.9)
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        ax.legend(handles=handles, loc="upper right",
+                  framealpha=0.95, fontsize=legend_fs_eff,
+                  borderaxespad=legend_borderaxespad, borderpad=legend_borderpad)
 
     # ---- helpers ----
     def _trail_window(k):
@@ -554,25 +582,22 @@ def make_system_obstacle_animation_v3(
         return start, k + 1
 
     def _set_follow_view(xc, yc):
-        half_w = follow_width  / 2.0 + max(radii)
-        half_h = follow_height / 2.0 + max(radii)
+        bump = max(radii) if len(radii) > 0 else 0.0
+        half_w = follow_width  / 2.0 + bump
+        half_h = follow_height / 2.0 + bump
         ax.set_xlim(xc - half_w, xc + half_w)
         ax.set_ylim(yc - half_h, yc + half_h)
 
-    # ---- init & update ----
     def init():
         trail_ln.set_data([], [])
         trail_pts.set_offsets(np.empty((0, 2)))
         agent_pt.set_data([], [])
         pred_lc.set_segments([])
-        for mkr in horizon_markers:
-            mkr.set_data([], [])
-        for c in circles:
-            c.center = (0, 0)
+        for mkr in horizon_markers: mkr.set_data([], [])
+        for c in circles: c.center = (0, 0)
         for layer in pred_circles_layers:
             for pc in layer:
-                pc.center = (0, 0)
-                pc.set_visible(False)
+                pc.center = (0, 0); pc.set_visible(False)
         return [trail_ln, trail_pts, agent_pt, *horizon_markers, *circles,
                 *[pc for layer in pred_circles_layers for pc in layer]]
 
@@ -583,7 +608,7 @@ def make_system_obstacle_animation_v3(
         if camera == "follow":
             _set_follow_view(xk, yk)
 
-        # trail: line + fading dots (exclude current)
+        # trail
         s, e = _trail_window(k)
         tail_xy = system_xy[s:e]
         trail_ln.set_data(tail_xy[:, 0], tail_xy[:, 1])
@@ -592,7 +617,7 @@ def make_system_obstacle_animation_v3(
         if len(pts_xy) > 0:
             trail_pts.set_offsets(pts_xy)
             n = len(pts_xy)
-            alphas = np.linspace(0.3, 1.0, n)  # old→light, new→solid
+            alphas = np.linspace(0.3, 1.0, n)
             cols = np.tile((*sys_rgb, 1.0), (n, 1))
             cols[:, 3] = alphas
             trail_pts.set_facecolors(cols)
@@ -600,34 +625,33 @@ def make_system_obstacle_animation_v3(
         else:
             trail_pts.set_offsets(np.empty((0, 2)))
 
-        # prediction: fading line + markers
-        ph = pred_paths[k]                  # (N+1, 2)
+        # horizon
+        ph = pred_paths[k]
         if N > 0:
-            future = ph[1:, :]              # (N, 2)
-            pred_poly = np.vstack((ph[0:1, :], future))   # include current for first segment
-            segs = np.stack([pred_poly[:-1], pred_poly[1:]], axis=1)  # (N, 2, 2)
+            future = ph[1:, :]
+            pred_poly = np.vstack((ph[0:1, :], future))
+            segs = np.stack([pred_poly[:-1], pred_poly[1:]], axis=1)
             pred_lc.set_segments(segs)
 
             seg_cols = np.tile((*pred_rgb, 1.0), (N, 1))
-            seg_cols[:, 3] = np.linspace(1.0, 0.35, N)  # near→far fade
+            seg_cols[:, 3] = np.linspace(1.0, 0.35, N)
             pred_lc.set_colors(seg_cols)
 
             for j in range(N):
                 horizon_markers[j].set_data([future[j, 0]], [future[j, 1]])
         else:
             pred_lc.set_segments([])
-            for mkr in horizon_markers:
-                mkr.set_data([], [])
+            for mkr in horizon_markers: mkr.set_data([], [])
 
-        # obstacles (current time k)
+        # obstacles
         for i, c in enumerate(circles):
             cx, cy = obs_positions[k, i]
             c.center = (cx, cy)
 
-        # --- predicted obstacle outlines at k+1..k+N ---
+        # ghosted future obstacles
         if N > 0:
             for h, layer in enumerate(pred_circles_layers, start=1):
-                t = min(k + h, T - 1)  # clamp to last available pose
+                t = min(k + h, T - 1)
                 for i, pc in enumerate(layer):
                     cx, cy = obs_positions[t, i]
                     pc.center = (cx, cy)
@@ -636,27 +660,60 @@ def make_system_obstacle_animation_v3(
         return [trail_ln, trail_pts, agent_pt, *horizon_markers, *circles,
                 *[pc for layer in pred_circles_layers for pc in layer]]
 
+    # ---- build frame sequence with segment speed control ----
+    def in_segment(k, seg):
+        if seg is None: return False
+        k0, k1 = seg
+        return (k0 <= k <= k1)
+
+    frame_seq = []
+    if segment_range is not None and segment_fps is not None and segment_fps > 0:
+        ratio = base_fps / float(segment_fps)
+        if ratio >= 1.0:
+            # SLOW segment: repeat frames by approx ratio
+            repeats = max(0, int(round(ratio)) - 1)
+            for k in range(T):
+                if in_segment(k, segment_range):
+                    frame_seq.extend([k] * (1 + repeats))
+                else:
+                    frame_seq.append(k)
+        else:
+            # FAST segment: skip frames by step ~ 1/ratio
+            step = max(1, int(round(1.0 / ratio)))  # keep every "step"-th frame
+            k0, k1 = segment_range
+            for k in range(T):
+                if in_segment(k, segment_range):
+                    if ((k - k0) % step) == 0:
+                        frame_seq.append(k)
+                else:
+                    frame_seq.append(k)
+    else:
+        # No segment speed override
+        frame_seq = list(range(T))
+
     # blit=False if camera follows (limits change each frame)
     blit_flag = (camera != "follow")
-    ani = animation.FuncAnimation(fig, update, frames=T, init_func=init,
+    ani = animation.FuncAnimation(fig, update, frames=frame_seq, init_func=init,
                                   blit=blit_flag, interval=interval_ms)
 
-    # ---- save / show ----
+    # ---- save / show (no white edges) ----
+    savefig_kws = dict(bbox_inches="tight", pad_inches=0.0)
     if save_gif:
-        ani.save(out_path, writer="pillow", fps=fps, dpi=dpi)
+        ani.save(out_path, writer="pillow", fps=base_fps, dpi=dpi,
+                 savefig_kwargs=savefig_kws)
     if save_mp4:
         try:
-            writer = animation.FFMpegWriter(fps=fps, bitrate=2500)
+            writer = animation.FFMpegWriter(fps=base_fps, bitrate=2500)
             ani.save(mp4_path or out_path.replace(".gif", ".mp4"),
-                     writer=writer, dpi=dpi)
+                     writer=writer, dpi=dpi, savefig_kwargs=savefig_kws)
         except Exception as e:
             print("MP4 save failed. Install ffmpeg or add it to PATH. Error:", e)
 
     if show:
         plt.show()
     else:
-        plt.close(fig)      
-    
+        plt.close(fig)  
+            
 def make_system_obstacle_svg_frames_v3(
         states_eval: np.ndarray,      # (T,4) or (T,2)
         pred_paths: np.ndarray,       # (T, N+1, 2), ph[0] = current x_k
@@ -1000,7 +1057,7 @@ def make_system_obstacle_montage_v1(
     camera: str = "static", follow_width: float = 4.0, follow_height: float = 4.0,
 
     # ---- styling ----
-    system_color: str = "C0", pred_color: str = "orange",
+    system_color: str = "grey", pred_color: str = "#000000FF",
     tick_fontsize: int = 16, axis_labelsize: int = 22,
     axis_labelpad_xy: tuple[int, int] = (24, 24),
     spine_width: float = 1.25, tick_width: float = 1.25,
@@ -1089,9 +1146,9 @@ def make_system_obstacle_montage_v1(
     sys_rgb, pred_rgb = mcolors.to_rgb(system_color), mcolors.to_rgb(pred_color)
     cmap = plt.get_cmap("tab10"); obst_cols = [cmap.colors[i % len(cmap.colors)] for i in range(m)]
     handles = [
-        mlines.Line2D([], [], color=sys_rgb, lw=2, label=f"Last Steps (N={trail_N})"),
+        mlines.Line2D([], [], marker="o", color=sys_rgb, lw=2, label=f"Last Steps (N={trail_N})"),
         mlines.Line2D([], [], marker="o", linestyle="None", color="red", markersize=7, label="System"),
-        mlines.Line2D([], [], color=pred_rgb, lw=2, label=f"Predicted Horizon (N={N})"),
+        mlines.Line2D([], [], marker="o", color=pred_rgb, lw=2, label=f"Predicted Horizon (N={N})"),
         *[mlines.Line2D([], [], color=obst_cols[i], lw=2, label=f"Obstacle {i+1}") for i in range(m)]
     ]
     if N > 0:
@@ -1236,6 +1293,7 @@ def run_simulation(params, env, experiment_folder, episode_duration,
     """
     USE the after_updates flag to determine if the simulation is run after the updates or not!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     """
+    slack_penalty_eval = slack_penalty_eval/(horizon+len(positions))  # normalize slack penalty by horizon + number of obstacles
     env = env()
     mpc = MPC(layers_list, horizon, positions, radii, slack_penalty_eval, mode_params, modes)
     obst_motion = ObstacleMotion(positions, modes, mode_params)
