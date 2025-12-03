@@ -70,7 +70,7 @@ params_innit["nn_params"] = list
 #seems params_innit gets overwritten
 params_original = params_innit.copy() 
 
-experiment_folder_name = "Noslackexp"
+experiment_folder_name = "thefirst_part_experiment"
 
 
 

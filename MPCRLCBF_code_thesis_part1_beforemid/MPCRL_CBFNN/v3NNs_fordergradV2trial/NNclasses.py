@@ -837,6 +837,8 @@ class RLclass:
             self.lam_x_prev_VMPCrandom = cs.DM()  
             self.lam_g_prev_VMPCrandom = cs.DM()
             
+            self.best_params       = params_innit.copy()
+            
         
         
         def save_figures(self, figures, experiment_folder, save_in_subfolder=False):
@@ -885,7 +887,7 @@ class RLclass:
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            self.save_figures([(fig_p, 'P_B_update_over_time')], experiment_folder)
+            self.save_figures([(fig_p, 'P_B_update_over_time.svg')], experiment_folder)
             plt.close(fig_p)
 
             # 2. Plot just the NN mean
@@ -897,7 +899,7 @@ class RLclass:
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            self.save_figures([(fig_nn, 'NN_mean_B_update_over_time')], experiment_folder)
+            self.save_figures([(fig_nn, 'NN_mean_B_update_over_time.svg')], experiment_folder)
             plt.close(fig_nn)
         
         def ADAM(self, iteration, gradient, exp_avg, exp_avg_sq,
@@ -919,12 +921,13 @@ class RLclass:
             dtheta = -step_size * (exp_avg / denom)
             return dtheta, exp_avg, exp_avg_sq
 
-        def update_learning_rate(self, current_stage_cost):
+        def update_learning_rate(self, current_stage_cost, params):
             """
             Update the learning rate based on the current stage cost metric.
             """
 
             if current_stage_cost < self.best_stage_cost:
+                self.best_params       = params.copy()
                 self.best_stage_cost = current_stage_cost
                 self.current_patience = 0
             else:
@@ -935,6 +938,8 @@ class RLclass:
                 self.alpha *= self.lr_decay_factor  # decay 
                 print(f"Learning rate decreased from {old_alpha} to {self.alpha} due to no stage cost improvement.")
                 self.current_patience = 0  # reset 
+                params = self.best_params
+            return params        
 
         # def noise_scale_by_distance(x, y, max_radius=3):
         #     # i might remove this because it doesnt allow for exploration of the last states which is important
@@ -1185,7 +1190,7 @@ class RLclass:
                 figactions=plt.figure()
                 plt.plot(actions_eval[:, 0], "o-", label="Action 1")
                 plt.plot(actions_eval[:, 1], "o-", label="Action 2")
-                plt.xlabel("Iteration $k$")
+                plt.xlabel("Time Step $k$")
                 plt.ylabel("Action")
                 plt.title("Actions")
                 plt.legend()
@@ -1195,7 +1200,7 @@ class RLclass:
 
                 figstagecost=plt.figure()
                 plt.plot(stage_cost_eval, "o-")
-                plt.xlabel("Iteration $k$")
+                plt.xlabel("Time Step $k$")
                 plt.ylabel("Cost")
                 plt.title("Stage Cost")
                 plt.legend()
@@ -1205,7 +1210,7 @@ class RLclass:
                 figsvelocity=plt.figure()
                 plt.plot(states_eval[:, 2], "o-", label="Velocity x")
                 plt.plot(states_eval[:, 3], "o-", label="Velocity y")    
-                plt.xlabel("Iteration $k$")
+                plt.xlabel("Time Step $k$")
                 plt.ylabel("Velocity Value")
                 plt.title("Velocity Plot")
                 plt.legend()
@@ -1216,17 +1221,17 @@ class RLclass:
                 print(f"Stage Cost: {sum_stage_cost}")
                 
                 figs = [
-                                (figstates, f"states_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
-                                (figactions, f"actions_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
-                                (figstagecost, f"stagecost_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.png"),
-                                (figsvelocity, f"velocity_MPCeval_{self.eval_count}_S_{sum_stage_cost}.png")
+                                (figstates, f"states_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg"),
+                                (figactions, f"actions_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg"),
+                                (figstagecost, f"stagecost_MPCeval_{self.eval_count}_SC_{sum_stage_cost}.svg"),
+                                (figsvelocity, f"velocity_MPCeval_{self.eval_count}_S_{sum_stage_cost}.svg")
                 ]
 
 
                 self.save_figures(figs, experiment_folder, "Evaluation")
                 plt.close("all")
 
-                self.update_learning_rate(sum_stage_cost)
+                _ = self.update_learning_rate(sum_stage_cost, params)
 
                 self.eval_count += 1
 
@@ -1271,7 +1276,7 @@ class RLclass:
             
             # constrained update qp update
             solution = self.qp_solver(
-                    p=cs.vertcat(theta_vector_num, identity.flatten(), dtheta),
+                    p=cs.vertcat(theta_vector_num, identity.flatten(), -dtheta),
                     lbg=cs.vertcat(np.zeros(4), -np.inf*np.ones(theta_vector_num.shape[0]-4)),
                     ubg = cs.vertcat(np.inf*np.ones(theta_vector_num.shape[0])),
                     # ubx = ubx,
@@ -1346,11 +1351,14 @@ class RLclass:
 
             for i in range(1,episode_duration*num_episodes):
 
-                if i == 143*10*3000:
-                    self.alpha = self.alpha*0.01
+                # if i == 133*10*3000:
+                #     self.alpha = self.alpha*0.01
 
-                if i == 145*10*3000:
-                    self.alpha = self.alpha*0.01    
+                # if i == 119*10*3000:
+                #     self.alpha = self.alpha*0.1    
+                    
+                # if i == 123*10*3000:
+                #     self.alpha = self.alpha*0.1  
                 
                 rand = self.noise_scalingfactor*self.np_random.normal(loc=0, scale=self.noise_variance, size = (2,1))
 
@@ -1415,7 +1423,7 @@ class RLclass:
                 )['qlagrange_sens']
 
                 # first order update
-                B_update = -TD*qlagrange_numeric_jacob
+                B_update = TD*qlagrange_numeric_jacob
                 grad_temp.append(qlagrange_numeric_jacob)
                 B_update_buffer.append(B_update)
                         
@@ -1501,7 +1509,7 @@ class RLclass:
                         figvelocity=plt.figure()
                         plt.plot(states[:, 2], "o-", label="Velocity x")
                         plt.plot(states[:, 3], "o-", label="Velocity y")    
-                        plt.xlabel("Iteration $k$")
+                        plt.xlabel("Time Step $k$")
                         plt.ylabel("Velocity Value")
                         plt.title("Velocity Plot")
                         plt.legend()
@@ -1523,7 +1531,7 @@ class RLclass:
                         plt.scatter(indices[mask_far], TD_temp[mask_far], c='blue', label='Far from Circle')
                         plt.yscale('log')
                         plt.title("TD Over Training (Log Scale) - Colored by Proximity")
-                        plt.xlabel("Iteration $k$")
+                        plt.xlabel("Time Step $k$")
                         plt.ylabel("TD")
                         plt.legend()
                         plt.grid(True)
@@ -1531,7 +1539,7 @@ class RLclass:
                         figactions=plt.figure()
                         plt.plot(actions[:, 0], "o-", label="Action 1")
                         plt.plot(actions[:, 1], "o-", label="Action 2")
-                        plt.xlabel("Iteration $k$")
+                        plt.xlabel("Time Step $k$")
                         plt.ylabel("Action")
                         plt.title("Actions")
                         plt.legend()
@@ -1551,7 +1559,7 @@ class RLclass:
                         
                         for idx, lbl in enumerate(labels):
                                 plt.plot(gradst[:, idx], "o-", label=lbl)
-                        plt.xlabel('Iteration $k$')
+                        plt.xlabel('Time Step $k$')
                         plt.ylabel('P gradient')
                         plt.title('P parameter gradients over training')
                         plt.legend()
@@ -1563,7 +1571,7 @@ class RLclass:
                         NN_figgrad = plt.figure()
                         plt.plot(mean_mag, "o-", label='mean |NN grad|')
 
-                        plt.xlabel('Iteration $k$')
+                        plt.xlabel('Time Step $k$')
                         plt.ylabel('NN Mean absolute gradient')
                         plt.title('NN mean acoss NN params gradient magnitude over training')
                         plt.legend()
@@ -1572,12 +1580,12 @@ class RLclass:
                         # plt.show()
 
                         figures_training = [
-                            (figstate, f"position_plotat_{i}"),
-                            (figvelocity, f"velocity_plotat_{i}"),
-                            (figtdtemp, f"TD_plotat_{i}"),
-                            (figactions, f"action_plotat_{i}"),
-                            (P_figgrad, f"P_grad_plotat_{i}"),
-                            (NN_figgrad, f"NN_grad_plotat_{i}"),
+                            (figstate, f"position_plotat_{i}.svg"),
+                            (figvelocity, f"velocity_plotat_{i}.svg"),
+                            (figtdtemp, f"TD_plotat_{i}.svg"),
+                            (figactions, f"action_plotat_{i}.svg"),
+                            (P_figgrad, f"P_grad_plotat_{i}.svg"),
+                            (NN_figgrad, f"NN_grad_plotat_{i}.svg"),
                             ]
                         self.save_figures(figures_training, experiment_folder, "Learning")
                         plt.close("all")
@@ -1607,10 +1615,10 @@ class RLclass:
        
 
             figP = plt.figure(figsize=(10, 5))
-            plt.plot(params_history_P[:, 0, 0], label=r"$P[1,1]$")
-            plt.plot(params_history_P[:, 1, 1], label=r"$P[2,2]$")
-            plt.plot(params_history_P[:, 2, 2], label=r"$P[3,3]$")
-            plt.plot(params_history_P[:, 3, 3], label=r"$P[4,4]$")
+            plt.plot(params_history_P[:, 0, 0], label=r"$P_{1,1}$")
+            plt.plot(params_history_P[:, 1, 1], label=r"$P_{2,2}$")
+            plt.plot(params_history_P[:, 2, 2], label=r"$P_{3,3}$")
+            plt.plot(params_history_P[:, 3, 3], label=r"$P_{4,4}$")
             # plt.title("Parameter: P",        fontsize=24)
             plt.xlabel("Update Number",     fontsize=20)
             plt.ylabel("Value",             fontsize=20)
@@ -1685,15 +1693,38 @@ class RLclass:
 
 
             figures_to_save = [
-                (figP, "P"),
-                (figstagecost, "stagecost"),
-                (figstagecost_nice, "stagecost_smoothed"),
-                (figtd, "TD")
+                (figP, "P.svg"),
+                (figstagecost, "stagecost.svg"),
+                (figstagecost_nice, "stagecost_smoothed.svg"),
+                (figtd, "TD.svg")
 
             ]
             self.save_figures(figures_to_save, experiment_folder)
             plt.close("all")
             
-            return params
+            # everything used by the plots
+            npz_payload = {
+                # x-axis for cost/TD/smoothed plots
+                "episodes": episodes.astype(np.int64),
+
+                # stage-cost (raw) + TD
+                "stage_cost": cost.astype(np.float64),
+                "td": np.asarray(TD_history, dtype=np.float64).reshape(-1),
+
+                # smoothed stage-cost figure
+                "running_mean": running_mean.astype(np.float64),
+                "running_std": running_std.astype(np.float64),
+                "smoothing_window": np.array([window], dtype=np.int64),
+
+                # parameter history shown (you plot its diagonals)
+                "params_history_P": np.asarray(params_history_P, dtype=np.float64),
+
+                # plotted by self.plot_B_update(...)
+                "B_update_history": np.asarray(B_update_history),
+            }
+            
+            np.savez_compressed(os.path.join(experiment_folder, "training_data.npz"), **npz_payload)
+            
+            return self.best_params
         
         

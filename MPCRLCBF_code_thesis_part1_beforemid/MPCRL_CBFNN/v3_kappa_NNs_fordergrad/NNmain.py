@@ -5,7 +5,7 @@ import os
 from NNclasses import env
 from NNclasses import RLclass
 from NNclasses import NN
-from NNfunctions import run_simulation, run_simulation_randomMPC, generate_experiment_notes
+from NNfunctions import run_simulation, run_simulation_randomMPC, generate_experiment_notes, plot_kappa_vs_h_for_states#, #plot_kappa_with_linear_baseline
 
 
 
@@ -22,7 +22,7 @@ gamma = 0.95
 episode_duration= 3000
 num_episodes = 3000
 
-layers_list = [1, 7, 7, 1]
+layers_list = [5, 8, 8, 1]
 
 replay_buffer= 10*episode_duration #buffer is 5 episodes long
 episode_updatefreq = 10# updates every 3 episodes
@@ -67,11 +67,53 @@ params_innit["nn_params"] = list
 #seems params_innit gets overwritten
 params_original = params_innit.copy() 
 
-experiment_folder_name = "NNRMSprop_14"
+experiment_folder_name = "FIXEDNN_2"
 
 # nn_model.plot_kappa(h_vals= None, params = params_innit, experiment_folder=experiment_folder_name)
 
+states_to_test = [
+    np.array([-5, -5, 0, 0]),
+    np.array([-4, -3, 0.2, -0.1]),
+    np.array([-3.5, -2.2, 0.0, 0.0]),
+    np.array([-1.0, -4.0, 0.3, 0.1]),
+]
 
+# if you already have learned params:
+# flat_params = learned_params  # cs.DM column
+
+# otherwise let the function init its own
+plot_kappa_vs_h_for_states(
+    nn=nn_model,
+    states_list=states_to_test,
+    flat_params=None,      # or your learned params
+    h_range=(-20, 40),
+    n_points=400,
+    show_raw=True,         # also draw raw NN(x,h) (dashed)
+    title="κ(x,h) vs h across several fixed states",
+)
+
+# plot_kappa_with_linear_baseline(
+#     nn=nn_model,
+#     states_list=states_to_test,
+#     flat_params=None,
+#     h_range=(-1.0, 2.0),
+#     n_points=500,
+#     show_raw=False,         # paper only shows κ curves
+#     linear_slope=None,      # auto-fit
+#     fit_window=0.2,
+#     title="learned κ vs fitted linear κ"
+# )
+
+# plot_kappa_with_linear_baseline(
+#     nn=nn_model,
+#     states_list=states_to_test,
+#     flat_params=None,
+#     h_range=(-1.0, 2.0),
+#     n_points=500,
+#     show_raw=False,
+#     linear_slope=5.0,
+#     title="learned κ vs linear κ (c=5)"
+# )
 
 # run_simulation_randomMPC(params_innit, env, experiment_folder_name, episode_duration, layers_list, noise_scalingfactor, noise_variance)
 

@@ -1,164 +1,289 @@
 
-import numpy as np
-import casadi as cs
+import multiprocessing
 import os
 import copy
-from config import SAMPLING_TIME, SEED, NUM_STATES, NUM_INPUTS, CONSTRAINTS_X, CONSTRAINTS_U
-from Classes import env
-from Classes import RLclass
-from Classes import NN
-from Functions import run_simulation, run_simulation_randomMPC, generate_experiment_notes
+import optuna
+import numpy as np
+import casadi as cs
 
 
 
+from config import (
+    SAMPLING_TIME,
+    SEED,
+    NUM_STATES,
+    NUM_INPUTS,
+    CONSTRAINTS_X,
+    CONSTRAINTS_U,
+)
+from Classes import env, RLclass, NN
+from Functions import (
+    run_simulation,
+    run_simulation_randomMPC,
+    generate_experiment_notes,
+    objective,
+    save_best_results
+)
 
 
-######### Main #########
-#parameters for running the experiments
 
-dt = SAMPLING_TIME
-seed = SEED
-noise_scalingfactor = 20
-noise_variance = 5
-alpha = 5e-1
-gamma = 0.95
-episode_duration= 150
-num_episodes = 3000
+def main():
+    """
+    Main for raining a CBF NN with MPC in a moving-obstacle environment.
+    """
+    
+    # ─── Experiment variables ────────────────────────────────────────────
+    dt = SAMPLING_TIME
+    seed = SEED
 
-# MPC HORIZON
-horizon = 5
+    # Noise / exploration schedule
+    initial_noise_scale = 10
+    noise_variance = 5
+    decay_at_end = 0.01
+    
+    num_episodes = 3000
+    episode_update_freq = 3  # frequency of updates (e.g. update every 10 episodes)
+    decay_rate = 1 - np.power(decay_at_end, 1 / (num_episodes / episode_update_freq))
+    print(f"Computed noise decay_rate: {decay_rate:.4f}")
 
-replay_buffer= 10*episode_duration #buffer is 5 episodes long
-episode_updatefreq = 10# updates every 3 episodes
+    # RL hyper-parameters
+    alpha = 7e-3       # initial learning rate
+    gamma = 0.95        # discount factor
+    slack_penalty_MPC = 2e7  # penalty on slack variables in CBF constraints for the MPC stage cost
+    slack_penalty_RL = 3e4 # penalty on slack variables in CBF constraints for RL stage cost
+    
+    # Learning rate scheduler
+    # patience = number of epochs with no improvement after which learning rate will be reduced
+    patience = 5
+    lr_decay = 0.1     # factor to shrink the learning rate with after patience is reached
 
-patience_threshold = 10000
-lr_decay_factor = 0.1
-
-decay_at_end = 0.01
-decay_rate = 1 - np.power(decay_at_end, 1/(num_episodes/episode_updatefreq))
-print(f"decay_rate: {decay_rate}")
-
-
-params_innit = {
-    # State matrices
-    "A": cs.DM([
-            [1, 0, dt, 0], 
-            [0, 1, 0, dt], 
-            [0, 0, 1, 0], 
-            [0, 0, 0, 1]
-        ]) ,
-    "B": cs.DM([
-            [0.5 * dt**2, 0], 
-            [0, 0.5 * dt**2], 
-            [dt, 0], 
-            [0, dt]
+    # Episode / MPC specs
+    episode_duration = 150
+    mpc_horizon = 6
+    replay_buffer_size = episode_duration * episode_update_freq  # buffer holding number of episodes (e.g. hold 10 episodes)
+    
+    #name of folder where the experiment is saved
+    experiment_folder = "NNSigmoid_52_noP_diag"
+    
+    #check if file exists already, if yes raise an exception
+    # if os.path.exists(experiment_folder):
+    #     raise FileExistsError(f"Experiment folder '{experiment_folder}' already exists. Please choose a different name.")
+    
+    
+    # ──Linear dynamics and MPC parameters───────────────────────────────────
+    params_init = {
+        "A": cs.DM([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
         ]),
-    # Learned parameters
-    "b":  cs.DM([0, 0, 0, 0]),
-    "V0": cs.DM(0.0),
-    "P" : 100*np.identity(4),
-    "Q" : 10*np.identity(4), 
-    "R" : np.identity(2)
-}
+        "B": cs.DM([
+            [0.5 * dt**2, 0],
+            [0, 0.5 * dt**2],
+            [dt, 0],
+            [0, dt],
+        ]),
+        "b": cs.DM([0, 0, 0, 0]),
+        "V0": cs.DM(0.0),
+        "P": 100 * np.eye(NUM_STATES),
+        "Q": 10 * np.eye(NUM_STATES),
+        "R": np.eye(NUM_INPUTS),
+    }
+    
+     # ─── Obstacle configuration ──────────────────────────────────────────────
+    # positions = [(-2.0, -1.5), (-3.0, -3.0)]
+    # radii     = [0.75, 0.75]
+    # modes     = ["step_bounce", "step_bounce"]
+    # mode_params = [
+    #     {"bounds": (-4.0,  0.0), "speed": 4.3, "dir":  1},
+    #     {"bounds": (-4.0,  1.0), "speed": 4.0, "dir": -1},
+    # ]
+    positions = [(-2.0, -1.5), (-3.0, -3.3), (-2.0, 0.0)]
+    radii     = [0.7, 0.7, 1]
+    modes     = ["step_bounce", "step_bounce", "static"]
+    mode_params = [
+    {"bounds": (-4.0,  0.0), "speed": 2.3, "dir":  1},
+    {"bounds": (-4.0,  1.0), "speed": 2.0, "dir": -1},
+    {"bounds": (-2.0,  -2.0), "speed": 0.0},
 
-# # Obstacles used in the enviroment
-# positions = [(-1.75, -1.5), (-4.0, -3.0)]
-# radii     = [0.5, 0.5]
+]
 
-# modes       = ["step_bounce", "step_bounce"]                   # one obstacle, bouncing
-# mode_params = [{"bounds":(-4.0, 1.0), "speed":1.5, "dir": 1},  {"bounds":(-4.0, 1.0), "speed":1.5, "dir": -1}]
-
-positions = [(-2.0, -1.5), 
-             (-3.0, -3.0)]
-
-
-radii     = [0.75, 0.75]  
-
-modes       = ["step_bounce", "step_bounce"]
-mode_params = [{'bounds': (-4.0, 0.0), 'speed': 2.3, 'dir': 1}, 
-               {'bounds': (-4.0, 1.0), 'speed': 2.0, 'dir': -1}]
-
-# positions = [
-#     ( -1.0, -1.0),  # orbit #1 around origin
-#     (-2.0, 2.0),  # orbit #2 around (–1,1)
-#     (2.0, -2.0),
-#     (1.0, 1.0),
+#     positions = [(-4.0, -4.25)]
+#     radii     = [1.5]
+#     modes     = ["static"]
+#     mode_params = [
+#     {"bounds": (-2.0,  -2.0), "speed": 0.0},
 # ]
+    
+    # ─── Build & initialize NN CBF ───────────────────────────────────────────
 
-# radii = [0.7, 1.5, 1.5, 0.7]  # radii of the obstacles
+    input_dim = NUM_STATES + len(positions) + 2*len(positions) #x+h(x)+ (obs_positions_x + obs_positions_y)
+    hidden_dims = [16, 16, 16]
+    output_dim = len(positions)
+    layers_list = [input_dim] + hidden_dims + [output_dim]
+    print("NN layers:", layers_list)
 
-# modes = [
-#     "orbit",
-#     "orbit",
-#     "orbit",
-#     "orbit",
-# ]
+    nn = NN(layers_list, positions, radii, copy.deepcopy(mode_params), modes)
+    flat_nn_params, _, _ = nn.initialize_parameters()
+    params_init["nn_params"] = flat_nn_params
 
-# mode_params = [
-#     # orbit #1: angular speed 0.8 rad/s around origin
-#     {"omega": 0.5, "center": (0.0, 0.0)},
-#     # orbit #2: angular speed 1.2 rad/s around (-1, 1)
-#     {"omega": 0.5, "center": (0.0, 0.0)},
-#     {"omega": 0.5, "center": (0.0, 0.0)},
-#     {"omega": 0.5, "center": (0.0, 0.0)},
-# ]
+    # keep a copy of the original parameters for later logging
+    params_before = params_init.copy()
+    
+    
+    # ─── The Learning  ─────────────────────────────────────
+    
+    # run simulation of random MPC to see how the system behaves under initial random noise
+    
+    # run_simulation_randomMPC(
+    #     params_init,
+    #     env,
+    #     experiment_folder,
+    #     episode_duration,
+    #     layers_list,
+    #     initial_noise_scale,
+    #     noise_variance,
+    #     mpc_horizon,
+    #     positions,
+    #     radii,
+    #     modes,
+    #     copy.deepcopy(mode_params),
+    #     slack_penalty_MPC,
+    # )
+    
+    # run simulation to get the initial policy before training
+    stage_cost_before = run_simulation(
+        params_init,
+        env,
+        experiment_folder,
+        episode_duration,
+        layers_list,
+        after_updates=False,
+        horizon=mpc_horizon,
+        positions=positions,
+        radii=radii,
+        modes=modes,
+        mode_params=copy.deepcopy(mode_params),
+        slack_penalty_eval=slack_penalty_MPC,
+    )
+    
+    # use RL to train the NN CBF with MPC
+    
+    rl_agent = RLclass(
+        params_init,
+        seed,
+        alpha,
+        gamma,
+        decay_rate,
+        layers_list,
+        initial_noise_scale,
+        noise_variance,
+        patience,
+        lr_decay,
+        mpc_horizon,
+        positions,
+        radii,
+        modes,
+        copy.deepcopy(mode_params),
+        slack_penalty_MPC,
+        slack_penalty_RL,
+    )
+    trained_params = rl_agent.rl_trainingloop(
+        episode_duration=episode_duration,
+        num_episodes=num_episodes,
+        replay_buffer=replay_buffer_size,
+        episode_updatefreq=episode_update_freq,
+        experiment_folder=experiment_folder,
+    )
+    
+    # evaluate the trained policy
+    
+    stage_cost_after = run_simulation(
+        trained_params,
+        env,
+        experiment_folder,
+        episode_duration,
+        layers_list,
+        after_updates=True,
+        horizon=mpc_horizon,
+        positions=positions,
+        radii=radii,
+        modes=modes,
+        mode_params=copy.deepcopy(mode_params),
+        slack_penalty_eval=slack_penalty_MPC,
+    )
+    
+    #save experiment configuration and results
+    generate_experiment_notes(
+        experiment_folder,
+        trained_params,
+        params_before,
+        episode_duration,
+        num_episodes,
+        seed,
+        alpha,
+        dt,
+        gamma,
+        decay_rate,
+        decay_at_end,
+        initial_noise_scale,
+        noise_variance,
+        stage_cost_before,
+        stage_cost_after,
+        layers_list,
+        replay_buffer_size,
+        episode_update_freq,
+        patience,
+        lr_decay,
+        mpc_horizon,
+        modes,
+        copy.deepcopy(mode_params),
+        positions,
+        radii,
+        slack_penalty_MPC,
+        slack_penalty_RL
+    )
 
-# inputs --> states and the different h(x)
-# last layer output --> number of obstacles aka for each h(x) have an alpha value
+    # append final stage-cost to folder name
+    suffix = f"_stagecost_{stage_cost_after:.2f}"
+    os.rename(experiment_folder, experiment_folder + suffix)
+    
+    
+if __name__ == "__main__":
+    main()
+    
+    
+# BASE_DIR = "optuna_runs_1"
+# if __name__ == "__main__":
+    
+#     os.makedirs(BASE_DIR, exist_ok=True)
 
-layers_list = [NUM_STATES+len(positions), 14, 14, 14, len(positions)]
-print("layers_list: ", layers_list)
-#initializing the NN
-nn_model = NN(layers_list, positions, radii)
+#     storage_path = os.path.join(BASE_DIR, "optuna.db")
+#     storage_uri  = f"sqlite:///{storage_path}"
+    
+#     # optuna.delete_study(study_name="my_nn_mpc_study", storage="sqlite:///optuna_runs/optuna.db")
+#     study = optuna.create_study(
+#         storage=storage_uri,  
+#         study_name="nn_mpc_study",
+#         direction="minimize",
+#         sampler=optuna.samplers.TPESampler(),
+#         pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
+#         load_if_exists=True,   # <-- resume if the DB file already exists
+#     )
+#     optuna.logging.set_verbosity(optuna.logging.INFO)
+    
+#     #n_jobs = 1 to run trials sequentially, running in parallel is not supported in this context
+#     # matplotlib and casadi are not thread-safe
+#     study.optimize(objective, n_trials=50, n_jobs = 1)
 
-list, _, _ = nn_model.initialize_parameters()
-
-params_innit["nn_params"] = list
-
-#seems params_innit gets overwritten
-params_original = params_innit.copy() 
-
-experiment_folder_name = "NN_mult_move_obj_experiment_44"
-
-#WATCH OUT --> since mode_params was a dict what was happening is that the values of it kept getting changed
-
-run_simulation_randomMPC(params_innit, env, experiment_folder_name, episode_duration, layers_list, noise_scalingfactor, noise_variance, 
-horizon, positions, radii, modes, copy.deepcopy(mode_params))
-
-stage_cost_sum_before = run_simulation(params_innit, env, experiment_folder_name, episode_duration, layers_list, False, horizon, positions, radii, modes, copy.deepcopy(mode_params))
-
-rl = RLclass(params_innit, seed, alpha, gamma, decay_rate, layers_list, noise_scalingfactor, 
-             noise_variance, patience_threshold, lr_decay_factor, horizon, positions, radii, modes, copy.deepcopy(mode_params))
-
-params = rl.rl_trainingloop(episode_duration = episode_duration, num_episodes = num_episodes, replay_buffer=replay_buffer,
-                            episode_updatefreq = episode_updatefreq, experiment_folder = experiment_folder_name)
-
-stage_cost_sum_after = run_simulation(params, env, experiment_folder_name, episode_duration, layers_list, True, horizon, positions, radii, modes, copy.deepcopy(mode_params))
-
-
-generate_experiment_notes(experiment_folder_name, params, params_original, episode_duration, num_episodes, seed, alpha, dt, 
-                          gamma, decay_rate, decay_at_end, noise_scalingfactor, noise_variance, stage_cost_sum_before, 
-                          stage_cost_sum_after, layers_list, replay_buffer, episode_updatefreq, patience_threshold, lr_decay_factor, horizon,
-                          modes, copy.deepcopy(mode_params), positions, radii)
-
-
-suffix = f"_stagecost_{stage_cost_sum_after:.2f}"
-
-new_folder_name = experiment_folder_name + suffix
-
-# Rename the existing folder name
-os.rename(experiment_folder_name, new_folder_name)
+#     print("Best trial:",  study.best_trial.number)
+#     print("  Value: ",    study.best_value)
+#     print("  Params:",    study.best_params)
+    
+#     save_best_results(study)
 
 
-
-
-# PROBLEMS:
-
-# I noticed that i punished cost for using slacks differently in MPC cost func and RL cost func
-# MPC cost func: np.sum(2e6 *S)
-# RL cost func: 2e6 * np.sum(S)
-
-# SOLUTION: I changed the RL cost func to match the MPC one
 
 
 

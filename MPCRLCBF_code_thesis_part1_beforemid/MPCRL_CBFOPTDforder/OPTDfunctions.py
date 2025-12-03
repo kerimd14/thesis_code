@@ -7,6 +7,7 @@ from control import dlqr
 from OPTDclasses import  MPC
 from matplotlib.colors import Normalize
 import matplotlib.cm as cm
+from npz_builder import NPZBuilder
 
 # global u constraint, used to play with the u constraint
 u_global = 1
@@ -32,7 +33,7 @@ def stage_cost_func(action, x):
             )
                 
 
-def MPC_func(x, mpc, params):
+def MPC_func(x, mpc, params, x_prev, lam_x_prev, lam_g_prev):
 
         solver_inst = mpc.MPC_solver() 
         
@@ -73,6 +74,9 @@ def MPC_func(x, mpc, params):
         R_flat = cs.reshape(R , -1, 1)
 
         solution = solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], V, P_diag, Q_flat, R_flat, Pw, omega0),
+            x0    = x_prev,
+            lam_x0 = lam_x_prev,
+            lam_g0 = lam_g_prev,
             ubx=ubx,  
             lbx=lbx,
             ubg =ubg,
@@ -86,8 +90,12 @@ def MPC_func(x, mpc, params):
         # print(f"omega parameter: {solution['x'][-1]}")
         # print(f"the whole solution: {solution['x']}")
         omega = solution['x'][-1]
+        
+        x_prev = solution["x"]
+        lam_x_prev = solution["lam_x"]
+        lam_g_prev= solution["lam_g"]
 
-        return u_opt, solution["f"], omega, g_resid
+        return u_opt, solution["f"], omega, g_resid, x_prev, lam_x_prev, lam_g_prev
 
 # def save_figure(fig, filename, experiment_folder):
      
@@ -139,9 +147,12 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     omegas = []
     hx = [mpc.h_func(cs.DM(state))]
     g_resid_lst = []    
+    
+    x_prev, lam_x_prev, lam_g_prev = cs.DM(), cs.DM(), cs.DM()
 
     for i in range(episode_duration):
-        action, _, omega, g_resid = MPC_func(state, mpc, params)
+        action, _, omega, g_resid, x_prev, lam_x_prev, lam_g_prev  = MPC_func(state, mpc, params,
+                                            x_prev, lam_x_prev, lam_g_prev)
 
         action = cs.fmin(cs.fmax(cs.DM(action), -u_global), u_global)
         state, _, done, _, _ = env.step(action)
@@ -193,7 +204,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     figactions=plt.figure()
     plt.plot(actions[:, 0], "o-", label="Action 1")
     plt.plot(actions[:, 1], "o-", label="Action 2")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Action")
     plt.title("Actions")
     plt.legend()
@@ -203,7 +214,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
 
     figstagecost=plt.figure()
     plt.plot(stage_cost, "o-")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Cost")
     plt.title("Stage Cost")
     plt.legend()
@@ -213,7 +224,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
 
     figsomega=plt.figure()
     plt.plot(omegas, "o-")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("$omega$ Value")
     plt.title("$omega$")
     plt.legend()
@@ -225,7 +236,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     figsvelocity=plt.figure()
     plt.plot(states[:, 2], "o-", label="Velocity x")
     plt.plot(states[:, 3], "o-", label="Velocity y")    
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Velocity Value")
     plt.title("Velocity Plot")
     plt.legend()
@@ -235,7 +246,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
 
     figshx =plt.figure()
     plt.plot(hx, "o-", label="$h(x_k)$")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("$h(x_k)$ Value")
     plt.title("$h(x_k)$ Plot")
     plt.legend()
@@ -246,7 +257,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     margin = hx[1:] - (np.ones(omegas.shape[0])- omegas) * hx[:-1]
     plt.plot(margin, marker='o', linestyle='-')
     plt.axhline(0, color='r', linestyle='--', label='safety threshold')
-    plt.xlabel(r'Iteration $k$')
+    plt.xlabel(r'Time Step $k$')
     plt.ylabel(r'$h(x_{k+1}) - (1-\alpha) \cdot h(x_k)$')
     plt.title('CBF Safety Margin over Time')
     plt.legend()
@@ -257,7 +268,7 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     plt.plot(g_resid, marker='o', linestyle='-', label = "$g(x_k)$")
     plt.plot(margin, marker='o', linestyle='-', label = "$margin$")
     plt.axhline(0, color='r', linestyle='--', label='safety threshold')
-    plt.xlabel(r'Iteration $k$')
+    plt.xlabel(r'Time Step $k$')
     plt.ylabel(r'$h(x_{k+1}) - (1-\alpha) \cdot h(x_k)$')
     plt.title('CBF Safety Margin over Time')
     plt.legend()
@@ -275,14 +286,14 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     fig8 = plt.figure()
     plt.plot(states[:,0], states[:,1], color='gray', alpha=0.5)
     sc1 = plt.scatter(states[:,0], states[:,1], c=iters, cmap=cmap, norm=norm, s=40)
-    cb1 = plt.colorbar(sc1, label='Iteration $k$')   # grab the Colorbar
-    cb1.set_label('Iteration $k$', fontsize=16)       # label font size
+    cb1 = plt.colorbar(sc1, label='Time Step $k$')   # grab the Colorbar
+    cb1.set_label('Time Step $k$', fontsize=16)       # label font size
     cb1.ax.tick_params(labelsize=12)  
     circle = plt.Circle((-2, -2.25), 1.5, color='k', fill=False, linewidth=2)
     plt.gca().add_patch(circle)
     plt.xlim([-5,0]); plt.ylim([-5,0])
     plt.xlabel('$X$', fontsize=20); plt.ylabel('$Y$', fontsize=20)
-    # plt.title('Trajectory Colored by Iteration')
+    # plt.title('Trajectory Colored by Time Step')
     plt.axis('equal'); plt.grid(); plt.tight_layout()
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
@@ -292,11 +303,11 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     fig9 = plt.figure()
     plt.plot(omegas, color='gray', alpha=0.5)
     sc2 = plt.scatter(iters[:-1], omegas, c=iters[:-1], cmap=cmap, norm=norm, s=40)
-    cb2 = plt.colorbar(sc2, label='Iteration $k$')
-    cb2.set_label('Iteration $k$', fontsize=16)
+    cb2 = plt.colorbar(sc2, label='Time Step $k$')
+    cb2.set_label('Time Step $k$', fontsize=16)
     cb2.ax.tick_params(labelsize=12)
-    plt.xlabel('Iteration $k$', fontsize=20); plt.ylabel('$\omega$ Value', fontsize=20)
-    # plt.title('Omega Colored by Iteration'); 
+    plt.xlabel('Time Step $k$', fontsize=20); plt.ylabel('$\omega$ Value', fontsize=20)
+    # plt.title('Omega Colored by Time Step'); 
     plt.grid(); plt.tight_layout()
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
@@ -306,11 +317,11 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     fig10 = plt.figure()
     plt.plot(hx, color='gray', alpha=0.5)
     sc3 = plt.scatter(iters, hx, c=iters, cmap=cmap, norm=norm, s=40)
-    cb3 = plt.colorbar(sc3, label='Iteration $k$')
-    cb3.set_label('Iteration $k$', fontsize=16)
+    cb3 = plt.colorbar(sc3, label='Time Step $k$')
+    cb3.set_label('Time Step $k$', fontsize=16)
     cb3.ax.tick_params(labelsize=12)
-    plt.xlabel('Iteration $k$', fontsize=20); plt.ylabel('$h(x_k)$', fontsize=20)
-    # plt.title('h(x_k) Colored by Iteration');
+    plt.xlabel('Time Step $k$', fontsize=20); plt.ylabel('$h(x_k)$', fontsize=20)
+    # plt.title('h(x_k) Colored by Time Step');
     plt.grid(); plt.tight_layout()
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
@@ -319,39 +330,39 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     fig11 = plt.figure()
     plt.plot(margin, color='gray', alpha=0.5)
     sc4 = plt.scatter(iters[:-1], margin, c=iters[:-1], cmap=cmap, norm=norm, s=40)
-    plt.colorbar(sc4, label='Iteration $k$')
+    plt.colorbar(sc4, label='Time Step $k$')
     plt.axhline(0, color='r', linestyle='--')
-    plt.xlabel('Iteration $k$'); plt.ylabel(r'$h(x_{k+1}) - (1-\alpha)\,h(x_k)$')
-    plt.title('Margin Colored by Iteration'); 
+    plt.xlabel('Time Step $k$'); plt.ylabel(r'$h(x_{k+1}) - (1-\alpha)\,h(x_k)$')
+    plt.title('Margin Colored by Time Step'); 
     plt.grid(); plt.tight_layout()
 
     plt.show()
     
     if after_updates == False:
         figs = [
-                    (figstates, "states_MPCregular_beforeupdates"),
-                    (figactions, "actions_MPCregular_beforeupdates"),
-                    (figstagecost, "stagecost_MPCregular_beforeupdates"),
-                    (figsomega, "omega_MPCregular_beforeupdates"),
-                    (figsvelocity, "velocity_MPCregular_beforeupdates"),
-                    (figshx, "hx_MPCregular_beforeupdates"),
-                    (figshxmarg, "marghx_MPCregular_beforeupdates")
+                    (figstates, "states_MPCregular_beforeupdates.svg"),
+                    (figactions, "actions_MPCregular_beforeupdates.svg"),
+                    (figstagecost, "stagecost_MPCregular_beforeupdates.svg"),
+                    (figsomega, "omega_MPCregular_beforeupdates.svg"),
+                    (figsvelocity, "velocity_MPCregular_beforeupdates.svg"),
+                    (figshx, "hx_MPCregular_beforeupdates.svg"),
+                    (figshxmarg, "marghx_MPCregular_beforeupdates.svg")
                 ]
     else:
          figs = [
-                    (figstates, "states_MPCregular_afterupdates"),
-                    (figactions, "actions_MPCregular_afterupdates"),
-                    (figstagecost, "stagecost_MPCregular_afterupdates"),
-                    (figsomega, "omega_MPCregular_afterupdates"),
-                    (figsvelocity, "velocity_MPCregular_afterupdates"),
-                    (figshx, "hx_MPCregular_afterupdates"),
-                    (figshxmarg, "marghx_MPCregular_afterupdates")
+                    (figstates, "states_MPCregular_afterupdates.svg"),
+                    (figactions, "actions_MPCregular_afterupdates.svg"),
+                    (figstagecost, "stagecost_MPCregular_afterupdates.svg"),
+                    (figsomega, "omega_MPCregular_afterupdates.svg"),
+                    (figsvelocity, "velocity_MPCregular_afterupdates.svg"),
+                    (figshx, "hx_MPCregular_afterupdates.svg"),
+                    (figshxmarg, "marghx_MPCregular_afterupdates.svg")
                 ]
 
-    figs.append((fig8, f"states_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
-    figs.append((fig9, f"omega_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
-    figs.append((fig10, f"hx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
-    figs.append((fig11, f"marghx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}"))
+    figs.append((fig8, f"states_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
+    figs.append((fig9, f"omega_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
+    figs.append((fig10, f"hx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
+    figs.append((fig11, f"marghx_colored_MPCregular_{'afterupdates' if after_updates else 'beforeupdates'}.svg"))
 
     save_figures(figs,  experiment_folder)
     plt.close('all')
@@ -360,9 +371,64 @@ def run_simulation(params, env, experiment_folder, episode_duration, after_updat
     print(f"Total trajectory length: {trajectory_length:.3f} units")
     print(f"Stage Cost: {sum(stage_cost)}")
 
+    suffix   = "after" if after_updates else "before"
+    data_dir = os.path.join(experiment_folder, "thesis_data_mpcregular")
+
+    # Ensure dtypes/shapes
+    states   = np.asarray(states,   dtype=np.float64)
+    actions  = np.asarray(actions,  dtype=np.float64)
+    stage_cost = np.asarray(stage_cost, dtype=np.float64).reshape(-1)
+    omegas   = np.asarray(omegas,   dtype=np.float64).reshape(-1)
+    hx       = np.asarray(hx,       dtype=np.float64).reshape(-1)
+    g_resid  = np.asarray(g_resid_lst, dtype=np.float64).reshape(-1)
+
+    # Iter index for colored plots
+    iters = np.arange(len(hx), dtype=np.int64)
+
+    # Safety margin exactly as used in plots, but made robust to length mismatch
+    # (omegas may be N-1). We align to hx[:-1].
+    omegas_for_margin = omegas[: max(0, len(hx)-1)]
+    margin = hx[1:1+len(omegas_for_margin)] - (1.0 - omegas_for_margin) * hx[:len(omegas_for_margin)]
+
+    # Obstacle and axes used in plots (meta)
+    obs_center = np.array([-2.0, -2.25], dtype=np.float64)
+    obs_radius = float(1.5)
+    xlim = np.array([-5.0, 0.0], dtype=np.float64)
+    ylim = np.array([-5.0, 0.0], dtype=np.float64)
+
+    mpc_npz = NPZBuilder(data_dir, "mpc_regular", float_dtype="float32")
+    mpc_npz.add(
+        # Series used directly by figures
+        states=states,                 # positions & velocities
+        actions=actions,
+        stage_cost=stage_cost,
+        omegas=omegas,
+        hx=hx,
+        g_resid=g_resid,
+        margin=margin,
+        iters=iters
+    )
+
+    # Optional but handy meta so plotting is standalone and reproducible
+    mpc_npz.meta(
+        Pw=float(params.get("Pw", np.nan)),
+        omega0=float(params.get("omega0", np.nan)),
+        obs_center=obs_center,
+        obs_radius=obs_radius,
+        xlim=xlim,
+        ylim=ylim,
+        run_tag=suffix,
+        trajectory_length=float(trajectory_length),
+        stage_cost_sum=float(stage_cost.sum())
+    )
+
+    npz_path = mpc_npz.finalize(suffix=suffix)
+    print(f"[saved] {npz_path}")
+
+
     return sum(stage_cost)
 
-def MPC_func_random(x, mpc, params, solver_inst, rand_noise):
+def MPC_func_random(x, mpc, params, solver_inst, rand_noise, x_prev, lam_x_prev, lam_g_prev):
         dt = 0.2
         
         # bounds
@@ -403,6 +469,9 @@ def MPC_func_random(x, mpc, params, solver_inst, rand_noise):
 
 
         solution = solver_inst(p = cs.vertcat(A_flat, B_flat, params["b"], V, P_diag, Q_flat, R_flat, Pw, omega0, rand_noise),
+            x0    = x_prev,
+            lam_x0 = lam_x_prev,
+            lam_g0 = lam_g_prev,
             ubx=ubx,  
             lbx=lbx,
             ubg =ubg,
@@ -412,8 +481,12 @@ def MPC_func_random(x, mpc, params, solver_inst, rand_noise):
 
         u_opt = solution["x"][mpc.ns * (mpc.horizon+1):mpc.ns * (mpc.horizon+1) + mpc.na]
         print(solution["x"][-1])
+        
+        x_prev = solution["x"]
+        lam_x_prev = solution["lam_x"]
+        lam_g_prev= solution["lam_g"]
 
-        return u_opt, solution["f"]
+        return u_opt, solution["f"], x_prev, lam_x_prev, lam_g_prev
 
 def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, noise_scalingfactor, noise_variance):
 
@@ -428,6 +501,8 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     mpc = MPC(0.2)
 
     solver_inst = mpc.MPC_solver_rand() 
+    
+    x_prev, lam_x_prev, lam_g_prev = cs.DM(), cs.DM(), cs.DM()  # initialize warm start variables
 
     for i in range(episode_duration):
         #rand_noise = noise_scalingfactor*np_random.normal(loc=0, scale=noise_variance, size = (2,1))
@@ -439,7 +514,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
 
         rand_noise = noise_scalingfactor*np_random.normal(loc=0, scale=noise_variance, size = (2,1)) #*noise_scale_by_distance(state[0], state[1])
 
-        action, _ = MPC_func_random(state, mpc, params, solver_inst, rand_noise=rand_noise)
+        action, _, x_prev, lam_x_prev, lam_g_prev = MPC_func_random(state, mpc, params, solver_inst, rand_noise=rand_noise, x_prev=x_prev, lam_x_prev=lam_x_prev, lam_g_prev=lam_g_prev)
         
 
         # if i<(0.65*2000):
@@ -481,7 +556,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     # Set labels and title
     plt.xlabel("$x$")
     plt.ylabel("$y$")
-    plt.title("Trajectories for different combinations of $P_w$ and $\omega_0$")
+    plt.title(r"Trajectories for different combinations of $P_w$ and $\bar{\omega}$")
     plt.legend()
     plt.axis("equal")
     plt.grid()
@@ -489,7 +564,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     figactions=plt.figure()
     plt.plot(actions[:, 0], "o-", label="Action 1")
     plt.plot(actions[:, 1], "o-", label="Action 2")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Action")
     plt.title("Actions")
     plt.legend()
@@ -499,7 +574,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
 
     figstagecost=plt.figure()
     plt.plot(stage_cost, "o-")
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Cost")
     plt.title("Stage Cost")
     plt.legend()
@@ -510,7 +585,7 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     figsvelocity=plt.figure()
     plt.plot(states[:, 2], "o-", label="Velocity x")
     plt.plot(states[:, 3], "o-", label="Velocity y")    
-    plt.xlabel("Iteration $k$")
+    plt.xlabel("Time Step $k$")
     plt.ylabel("Velocity Value")
     plt.title("Velocity Plot")
     plt.legend()
@@ -519,10 +594,10 @@ def run_simulation_randomMPC(params, env, experiment_folder, episode_duration, n
     ##plt.show()
 
     figs = [
-                (figstates, "states_MPCnoise"),
-                (figactions, "actions_MPCnoise"),
-                (figstagecost, "stagecost_MPCrandom"),
-                (figsvelocity, "velocity_MPCrandom")
+                (figstates, "states_MPCnoise.svg"),
+                (figactions, "actions_MPCnoise.svg"),
+                (figstagecost, "stagecost_MPCrandom.svg"),
+                (figsvelocity, "velocity_MPCrandom.svg")
             ]
 
     save_figures(figs,  experiment_folder)

@@ -28,7 +28,7 @@ layers_list = [5, 8, 8, 8, 1]
 replay_buffer= 10*episode_duration #buffer is 5 episodes long
 episode_updatefreq = 10# updates every 3 episodes
 
-patience_threshold = 500000
+patience_threshold = 10_000
 lr_decay_factor = 0.1
 
 decay_at_end = 0.001
@@ -68,7 +68,7 @@ params_innit["nn_params"] = list
 #seems params_innit gets overwritten
 params_original = params_innit.copy() 
 
-experiment_folder_name = "NNforderADAM_20"
+experiment_folder_name = "NNforderADAM_43"
 
 
 
